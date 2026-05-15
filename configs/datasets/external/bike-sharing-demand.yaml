@@ -1,0 +1,23 @@
+dataset:
+  type: csv
+  name: bike-sharing-demand
+  path: data/raw/bike-sharing-demand/train.csv
+  target_col: count
+  time_col: datetime
+  task_type: regression
+  read_csv_kwargs:
+    parse_dates: [datetime]
+
+experiment:
+  model_name: linear
+  window_size: 500
+  seed: 42
+  methods: [swds, mean_ks, max_ks, mean_psi, max_psi, mmd_rbf, energy, c2st]
+  retraining:
+    enabled: true
+    periods: [4, 8]
+    history_modes: [all, rolling]
+    rolling_history_windows: 4
+    oracle_min_quality_drop: 0.02
+
+output_dir: results/external/bike-sharing-demand

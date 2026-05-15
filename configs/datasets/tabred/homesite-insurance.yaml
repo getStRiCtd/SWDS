@@ -1,0 +1,19 @@
+dataset:
+  type: tabred
+  name: homesite-insurance
+  path: data/raw/tabred/homesite-insurance
+  split: default
+
+experiment:
+  model_name: linear
+  window_size: 2000
+  seed: 42
+  methods: [swds, mean_ks, max_ks, mean_psi, max_psi, mmd_rbf, energy, c2st]
+  retraining:
+    enabled: true
+    periods: [4, 8]
+    history_modes: [all, rolling]
+    rolling_history_windows: 4
+    oracle_min_quality_drop: 0.02
+
+output_dir: results/tabred/homesite-insurance

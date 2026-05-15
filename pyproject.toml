@@ -1,0 +1,66 @@
+[project]
+name = "article"
+version = "0.1.0"
+description = "Sliced Wasserstein drift monitoring experiments for temporal tabular ML"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "delu>=0.0.26",
+    "ipykernel>=7.2.0",
+    "joblib>=1.5.3",
+    "loguru>=0.7.3",
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.5",
+    "pandas>=3.0.3",
+    "plotnine>=0.15.4",
+    "pyyaml>=6.0.3",
+    "rtdl-num-embeddings>=0.0.12",
+    "rtdl-revisiting-models>=0.0.2",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+    "seaborn>=0.13.2",
+    "tomli>=2.4.1",
+    "tomli-w>=1.2.0",
+    "torch>=2.12.0",
+]
+
+[project.optional-dependencies]
+gbdt = [
+    "catboost>=1.2.8",
+    "lightgbm>=4.6.0",
+    "xgboost>=3.0.0",
+]
+ot = [
+    "pot>=0.9.6",
+]
+tabred = [
+    "kaggle>=1.7.4",
+    "loguru>=0.7.3",
+    "openpyxl>=3.1.5",
+    "polars>=1.36.0",
+    "pyarrow>=22.0.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu" },
+]
+torchvision = [
+  { index = "pytorch-cpu" },
+]
+
+[project.scripts]
+swds = "swds.cli:main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

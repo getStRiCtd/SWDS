@@ -1,0 +1,42 @@
+dataset:
+  type: synthetic
+  name: synthetic_temporal
+  task_type: classification
+  n_samples: 12000
+  n_numeric: 10
+  n_categorical: 3
+  drift_start_frac: 0.75
+  seed: 42
+
+experiment:
+  model_name: linear
+  window_mode: count
+  window_size: 500
+  reference_mode: train
+  recent_reference_windows: 4
+  seed: 42
+  methods:
+    - swds
+    - mean_ks
+    - max_ks
+    - mean_psi
+    - max_psi
+    - mmd_rbf
+    - energy
+    - c2st
+  threshold_quantile: 0.95
+  retraining:
+    enabled: true
+    periods: [2, 4, 8]
+    history_modes: [all, rolling]
+    rolling_history_windows: 4
+    oracle_min_quality_drop: 0.02
+
+ablation:
+  projection_counts: [16, 32, 64, 128, 256]
+  window_sizes: [250, 500, 1000]
+  threshold_quantiles: [0.9, 0.95, 0.975]
+  reference_modes: [train, recent]
+  representation_modes: [raw, pca, model_output]
+
+output_dir: results/synthetic

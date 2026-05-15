@@ -1,0 +1,21 @@
+dataset:
+  type: csv
+  name: ieee-cis-fraud
+  path: data/raw/ieee-cis-fraud-detection/train_transaction.csv
+  target_col: isFraud
+  time_col: TransactionDT
+  task_type: classification
+
+experiment:
+  model_name: linear
+  window_size: 5000
+  seed: 42
+  methods: [swds, mean_ks, max_ks, mean_psi, max_psi, mmd_rbf, energy, c2st]
+  retraining:
+    enabled: true
+    periods: [4, 8]
+    history_modes: [all, rolling]
+    rolling_history_windows: 4
+    oracle_min_quality_drop: 0.02
+
+output_dir: results/external/ieee-cis-fraud

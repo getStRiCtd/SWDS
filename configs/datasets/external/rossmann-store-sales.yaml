@@ -1,0 +1,24 @@
+dataset:
+  type: csv
+  name: rossmann-store-sales
+  path: data/raw/rossmann-store-sales/train.csv
+  target_col: Sales
+  time_col: Date
+  task_type: regression
+  read_csv_kwargs:
+    low_memory: false
+    parse_dates: [Date]
+
+experiment:
+  model_name: linear
+  window_size: 5000
+  seed: 42
+  methods: [swds, mean_ks, max_ks, mean_psi, max_psi, mmd_rbf, energy, c2st]
+  retraining:
+    enabled: true
+    periods: [4, 8]
+    history_modes: [all, rolling]
+    rolling_history_windows: 4
+    oracle_min_quality_drop: 0.02
+
+output_dir: results/external/rossmann-store-sales

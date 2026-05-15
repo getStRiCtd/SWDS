@@ -1,0 +1,38 @@
+dataset:
+  type: synthetic
+  name: synthetic_controlled_drift
+  task_type: classification
+  n_samples: 30000
+  n_numeric: 10
+  n_categorical: 3
+  drift_start_frac: 1.1
+  seed: 42
+
+synthetic_drift:
+  window_size: 300
+  drift_start_window: 8
+  scenarios:
+    - mean_shift
+    - variance_shift
+    - correlation_shift
+    - categorical_prior_shift
+    - missingness_shift
+    - local_subpopulation_shift
+    - concept_like_shift
+    - mixed_shift
+  methods:
+    - swds
+    - mean_ks
+    - max_ks
+    - mean_psi
+    - max_psi
+    - mmd_rbf
+    - energy
+    - c2st
+  threshold_quantile: 0.95
+  mean_delta: 0.75
+  variance_multiplier: 1.5
+  missing_probability: 0.2
+  local_fraction: 0.25
+
+synthetic_drift_output_dir: results/synthetic_drift
