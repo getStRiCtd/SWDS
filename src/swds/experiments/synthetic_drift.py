@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -13,6 +14,9 @@ from swds.data.temporal_split import official_split, temporal_split
 from swds.drift.registry import DEFAULT_METHODS, compute_drift_scores
 from swds.monitoring.thresholds import quantile_threshold
 from swds.monitoring.windows import fixed_count_windows
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_SCENARIOS = (
@@ -74,6 +78,15 @@ def run_synthetic_drift_experiment(
     output_dir: str | Path | None = None,
 ) -> SyntheticDriftResult:
     config = config or SyntheticDriftExperimentConfig()
+    LOGGER.info(
+        "synthetic drift experiment started dataset=%s rows=%d scenarios=%s methods=%s output_dir=%s",
+        dataset.name,
+        len(dataset.frame),
+        config.scenarios,
+        config.methods,
+        output_dir,
+    )
+    LOGGER.debug("synthetic drift config: %s", asdict(config))
     split = (
         official_split(dataset.frame, split_col=dataset.split_col)
         if dataset.split_col
@@ -85,15 +98,25 @@ def run_synthetic_drift_experiment(
             test_frac=config.test_frac,
         )
     )
+    LOGGER.info(
+        "synthetic drift split ready dataset=%s train=%d val=%d test=%d",
+        dataset.name,
+        len(split.train),
+        len(split.val),
+        len(split.test),
+    )
     feature_cols = dataset.feature_columns
+    LOGGER.info("synthetic drift building preprocessor dataset=%s features=%d", dataset.name, len(feature_cols))
     preprocessor, _ = build_preprocessor(
         split.train,
         feature_cols,
         max_onehot_cardinality=config.max_onehot_cardinality,
         hash_features=config.hash_features,
     )
+    LOGGER.info("synthetic drift fitting preprocessor dataset=%s", dataset.name)
     preprocessor.fit(split.train[feature_cols])
     X_ref = transform_to_float32(preprocessor, split.train[feature_cols])
+    LOGGER.debug("synthetic drift reference matrix shape=%s", tuple(getattr(X_ref, "shape", ())))
     stats = _fit_drift_stats(
         split.train,
         feature_cols,
@@ -102,6 +125,13 @@ def run_synthetic_drift_experiment(
 
     val_windows = fixed_count_windows(len(split.val), window_size=config.window_size, prefix="V")
     test_windows = fixed_count_windows(len(split.test), window_size=config.window_size, prefix="W")
+    LOGGER.info(
+        "synthetic drift windows ready validation=%d test=%d window_size=%d drift_start_window=%d",
+        len(val_windows),
+        len(test_windows),
+        config.window_size,
+        config.drift_start_window,
+    )
     validation_scores = _score_clean_windows(
         X_ref=X_ref,
         frame=split.val,
@@ -112,15 +142,27 @@ def run_synthetic_drift_experiment(
         seed=config.seed,
         dataset_name=dataset.name,
     )
+    LOGGER.info("synthetic drift calibrating thresholds validation_rows=%d", len(validation_scores))
     thresholds = _calibrate_thresholds(validation_scores, config.threshold_quantile)
+    LOGGER.info("synthetic drift thresholds ready methods=%d", len(thresholds))
+    LOGGER.debug("synthetic drift thresholds=%s", thresholds)
 
     rows = []
     for scenario in config.scenarios:
         if scenario not in DEFAULT_SCENARIOS:
             raise ValueError(f"unknown synthetic drift scenario: {scenario!r}")
+        LOGGER.info("synthetic drift scenario started scenario=%s windows=%d", scenario, len(test_windows))
         for window in test_windows:
             drift_label = int(window.index >= config.drift_start_window)
             raw_window = split.test.iloc[window.start : window.end].copy()
+            LOGGER.info(
+                "synthetic drift scoring window scenario=%s label=%s index=%d rows=%d drift_label=%d",
+                scenario,
+                window.label,
+                window.index,
+                window.size,
+                drift_label,
+            )
             if drift_label:
                 raw_window = inject_controlled_drift(
                     raw_window,
@@ -130,10 +172,20 @@ def run_synthetic_drift_experiment(
                     config=config,
                     seed=config.seed + 1009 * window.index,
                 )
+                LOGGER.debug("synthetic drift injected scenario=%s window=%s", scenario, window.label)
             X_cur = transform_to_float32(preprocessor, raw_window[feature_cols])
             scores = compute_drift_scores(X_ref, X_cur, methods=config.methods, seed=config.seed)
             for score in scores:
                 threshold = thresholds.get(score.method, np.nan)
+                LOGGER.debug(
+                    "synthetic drift score scenario=%s window=%s method=%s score=%.8f threshold=%s runtime=%.4fs",
+                    scenario,
+                    window.label,
+                    score.method,
+                    score.score,
+                    threshold,
+                    score.runtime_seconds,
+                )
                 rows.append(
                     {
                         "dataset": dataset.name,
@@ -152,12 +204,15 @@ def run_synthetic_drift_experiment(
                         "triggered": bool(np.isfinite(threshold) and score.score >= threshold),
                     }
                 )
+        LOGGER.info("synthetic drift scenario completed scenario=%s", scenario)
 
     window_scores = pd.DataFrame(rows)
+    LOGGER.info("synthetic drift summarizing detection rows=%d", len(window_scores))
     summary = summarize_detection(window_scores)
     result = SyntheticDriftResult(window_scores=window_scores, summary=summary, validation_scores=validation_scores)
     if output_dir is not None:
         save_synthetic_drift_result(result, output_dir=output_dir, config=config)
+    LOGGER.info("synthetic drift experiment completed dataset=%s output_dir=%s", dataset.name, output_dir)
     return result
 
 
@@ -170,10 +225,17 @@ def inject_controlled_drift(
     config: SyntheticDriftExperimentConfig,
     seed: int,
 ) -> pd.DataFrame:
+    LOGGER.debug(
+        "injecting controlled drift scenario=%s rows=%d seed=%d",
+        scenario,
+        len(frame),
+        seed,
+    )
     rng = np.random.default_rng(seed)
     shifted = frame.copy()
     numeric = _select_columns(stats.numeric_columns, config.numeric_fraction, rng)
     categorical = _select_columns(stats.categorical_columns, config.categorical_fraction, rng)
+    LOGGER.debug("controlled drift selected numeric=%s categorical=%s", numeric, categorical)
 
     if scenario == "mean_shift":
         _apply_mean_shift(shifted, numeric, stats, config.mean_delta)
@@ -204,6 +266,7 @@ def inject_controlled_drift(
 
 
 def summarize_detection(window_scores: pd.DataFrame) -> pd.DataFrame:
+    LOGGER.info("summarizing synthetic detection groups=%d", window_scores.groupby(["dataset", "scenario", "method"]).ngroups)
     rows = []
     for (dataset, scenario, method), group in window_scores.groupby(["dataset", "scenario", "method"], sort=True):
         ordered = group.sort_values("window_index")
@@ -239,7 +302,9 @@ def summarize_detection(window_scores: pd.DataFrame) -> pd.DataFrame:
                 "threshold": float(ordered["threshold"].dropna().iloc[0]) if ordered["threshold"].notna().any() else np.nan,
             }
         )
-    return pd.DataFrame(rows).sort_values(["scenario", "auroc"], ascending=[True, False])
+    out = pd.DataFrame(rows).sort_values(["scenario", "auroc"], ascending=[True, False])
+    LOGGER.info("synthetic detection summary ready rows=%d", len(out))
+    return out
 
 
 def save_synthetic_drift_result(
@@ -250,10 +315,13 @@ def save_synthetic_drift_result(
 ) -> None:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    result.window_scores.to_csv(output / "synthetic_drift_windows.csv", index=False)
-    result.summary.to_csv(output / "synthetic_drift_summary.csv", index=False)
-    result.validation_scores.to_csv(output / "synthetic_drift_validation_scores.csv", index=False)
-    pd.DataFrame([asdict(config)]).to_json(output / "synthetic_drift_config.json", orient="records", indent=2)
+    LOGGER.info("saving synthetic drift result output_dir=%s", output)
+    _write_csv(result.window_scores, output / "synthetic_drift_windows.csv")
+    _write_csv(result.summary, output / "synthetic_drift_summary.csv")
+    _write_csv(result.validation_scores, output / "synthetic_drift_validation_scores.csv")
+    config_path = output / "synthetic_drift_config.json"
+    pd.DataFrame([asdict(config)]).to_json(config_path, orient="records", indent=2)
+    LOGGER.info("wrote synthetic drift config path=%s", config_path)
 
 
 def _score_clean_windows(
@@ -267,10 +335,20 @@ def _score_clean_windows(
     seed: int,
     dataset_name: str,
 ) -> pd.DataFrame:
+    LOGGER.info("scoring clean validation windows dataset=%s windows=%d methods=%s", dataset_name, len(windows), methods)
     rows = []
     for window in windows:
+        LOGGER.info("scoring clean window dataset=%s label=%s index=%d rows=%d", dataset_name, window.label, window.index, window.size)
         X_cur = transform_to_float32(preprocessor, frame.iloc[window.start : window.end][feature_cols])
         for score in compute_drift_scores(X_ref, X_cur, methods=methods, seed=seed):
+            LOGGER.debug(
+                "clean validation score dataset=%s window=%s method=%s score=%.8f runtime=%.4fs",
+                dataset_name,
+                window.label,
+                score.method,
+                score.score,
+                score.runtime_seconds,
+            )
             rows.append(
                 {
                     "dataset": dataset_name,
@@ -281,7 +359,9 @@ def _score_clean_windows(
                     "runtime_seconds": score.runtime_seconds,
                 }
             )
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    LOGGER.info("clean validation scoring completed dataset=%s rows=%d", dataset_name, len(out))
+    return out
 
 
 def _calibrate_thresholds(validation_scores: pd.DataFrame, quantile: float) -> dict[str, float]:
@@ -290,6 +370,15 @@ def _calibrate_thresholds(validation_scores: pd.DataFrame, quantile: float) -> d
         scores = group["score"].replace([np.inf, -np.inf], np.nan).dropna().to_numpy(dtype=float)
         if len(scores):
             thresholds[method] = quantile_threshold(scores, quantile=quantile)
+            LOGGER.info(
+                "synthetic drift threshold calibrated method=%s quantile=%.4f value=%.8f n_scores=%d",
+                method,
+                quantile,
+                thresholds[method],
+                len(scores),
+            )
+        else:
+            LOGGER.warning("synthetic drift threshold skipped method=%s reason=no finite scores", method)
     return thresholds
 
 
@@ -299,6 +388,7 @@ def _fit_drift_stats(
     *,
     max_onehot_cardinality: int,
 ) -> DriftStats:
+    LOGGER.info("fitting drift injection stats train_rows=%d feature_cols=%d", len(train_frame), len(feature_cols))
     feature_types = infer_feature_types(
         train_frame,
         feature_cols,
@@ -319,7 +409,7 @@ def _fit_drift_stats(
         else:
             cat_values[col] = counts.index.astype(object).to_numpy()
             cat_probs[col] = counts.to_numpy(dtype=float)
-    return DriftStats(
+    stats = DriftStats(
         numeric_columns=numeric,
         categorical_columns=categorical,
         numeric_mean=numeric_mean,
@@ -328,6 +418,8 @@ def _fit_drift_stats(
         categorical_values=cat_values,
         categorical_probabilities=cat_probs,
     )
+    LOGGER.info("drift injection stats ready numeric=%d categorical=%d", len(numeric), len(categorical))
+    return stats
 
 
 def _select_columns(columns: list[str], fraction: float, rng: np.random.Generator) -> list[str]:
@@ -450,3 +542,8 @@ def _safe_metric(func, *args, **kwargs) -> float:
         return float(func(*args, **kwargs))
     except ValueError:
         return float("nan")
+
+
+def _write_csv(frame: pd.DataFrame, path: Path) -> None:
+    frame.to_csv(path, index=False)
+    LOGGER.info("wrote CSV path=%s rows=%d columns=%d", path, len(frame), len(frame.columns))

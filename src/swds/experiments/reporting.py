@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -14,24 +15,32 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "matplot
 import matplotlib.pyplot as plt
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def build_report_from_results(result_dirs: list[str], *, output_dir: str | Path) -> dict[str, Path]:
     output = Path(output_dir)
     tables = output / "tables"
     figures = output / "figures"
     tables.mkdir(parents=True, exist_ok=True)
     figures.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("report build started result_dirs=%d output_dir=%s", len(result_dirs), output)
 
     loaded = _load_result_tables([Path(path) for path in result_dirs])
+    LOGGER.info("report input tables loaded keys=%s", sorted(loaded))
     written: dict[str, Path] = {}
 
     if "dataset_summary" in loaded:
+        LOGGER.info("writing dataset summary table rows=%d", len(loaded["dataset_summary"]))
         written["dataset_summary"] = _write(loaded["dataset_summary"], tables / "table_1_dataset_summary.csv")
     if "window_scores" in loaded:
+        LOGGER.info("writing downstream quality table rows=%d", len(loaded["window_scores"]))
         written["downstream_quality"] = _write(
             _downstream_quality_table(loaded["window_scores"]),
             tables / "table_2_downstream_quality.csv",
         )
     if "correlations" in loaded:
+        LOGGER.info("writing drift-quality correlation tables rows=%d", len(loaded["correlations"]))
         corr = loaded["correlations"].copy()
         corr["dataset_model"] = corr["dataset"].astype(str) + "::" + corr["model"].astype(str)
         summary = _correlation_summary(corr)
@@ -41,7 +50,9 @@ def build_report_from_results(result_dirs: list[str], *, output_dir: str | Path)
             tables / "table_3b_friedman_test.csv",
         )
         written["correlation_boxplot"] = correlation_boxplot(corr, output_path=figures / "correlation_boxplot.png")
+        LOGGER.info("wrote correlation boxplot path=%s", written["correlation_boxplot"])
     if "synthetic_drift_summary" in loaded:
+        LOGGER.info("writing synthetic drift detection table rows=%d", len(loaded["synthetic_drift_summary"]))
         written["synthetic_drift_detection"] = _write(
             _synthetic_detection_summary(loaded["synthetic_drift_summary"]),
             tables / "table_4_synthetic_drift_detection.csv",
@@ -51,11 +62,13 @@ def build_report_from_results(result_dirs: list[str], *, output_dir: str | Path)
             figures / "detection_delay.png",
         )
     if "retraining_policy_summary" in loaded:
+        LOGGER.info("writing retraining policy table rows=%d", len(loaded["retraining_policy_summary"]))
         written["retraining_policy"] = _write(
             _retraining_summary(loaded["retraining_policy_summary"]),
             tables / "table_5_retraining_policy.csv",
         )
     if "ablation_correlations" in loaded:
+        LOGGER.info("writing ablation table rows=%d", len(loaded["ablation_correlations"]))
         written["ablation"] = _write(
             _ablation_summary(loaded["ablation_correlations"], loaded.get("ablation_runtimes")),
             tables / "table_6_ablation.csv",
@@ -68,6 +81,7 @@ def build_report_from_results(result_dirs: list[str], *, output_dir: str | Path)
         if not first.empty:
             method = "swds" if "swds" in set(first["method"]) else str(first["method"].iloc[0])
             written["timeline_plot"] = timeline_plot(first, method=method, output_path=figures / "timeline.png")
+            LOGGER.info("wrote timeline plot path=%s", written["timeline_plot"])
             written["scatter_plot"] = _scatter_plot(first, method=method, output_path=figures / "swds_vs_quality_drop.png")
     if "retraining_policy_summary" in loaded:
         written["retraining_regret_plot"] = _retraining_regret_plot(
@@ -75,6 +89,7 @@ def build_report_from_results(result_dirs: list[str], *, output_dir: str | Path)
             figures / "retraining_regret.png",
         )
 
+    LOGGER.info("report build completed written=%s", {key: str(path) for key, path in written.items()})
     return written
 
 
@@ -91,12 +106,16 @@ def _load_result_tables(result_dirs: list[Path]) -> dict[str, pd.DataFrame]:
     }
     tables: dict[str, list[pd.DataFrame]] = {key: [] for key in names}
     for result_dir in result_dirs:
+        LOGGER.info("scanning result directory path=%s", result_dir)
         for key, filename in names.items():
             path = result_dir / filename
             if path.exists():
                 frame = pd.read_csv(path)
                 frame.insert(0, "result_dir", str(result_dir))
                 tables[key].append(frame)
+                LOGGER.info("loaded result table key=%s path=%s rows=%d", key, path, len(frame))
+            else:
+                LOGGER.debug("result table absent key=%s path=%s", key, path)
     return {key: pd.concat(parts, ignore_index=True) for key, parts in tables.items() if parts}
 
 
@@ -197,6 +216,7 @@ def _ablation_summary(correlations: pd.DataFrame, runtimes: pd.DataFrame | None)
 
 
 def _detection_delay_plot(summary: pd.DataFrame, output_path: Path) -> Path:
+    LOGGER.info("writing detection delay plot path=%s rows=%d", output_path, len(summary))
     data = summary.dropna(subset=["detection_delay_windows"])
     fig, ax = plt.subplots(figsize=(8, 4))
     if not data.empty:
@@ -212,6 +232,7 @@ def _detection_delay_plot(summary: pd.DataFrame, output_path: Path) -> Path:
 
 
 def _scatter_plot(window_scores: pd.DataFrame, *, method: str, output_path: Path) -> Path:
+    LOGGER.info("writing scatter plot path=%s method=%s rows=%d", output_path, method, len(window_scores))
     data = window_scores.loc[window_scores["method"] == method].dropna(subset=["score", "quality_drop"])
     fig, ax = plt.subplots(figsize=(5, 4))
     ax.scatter(data["score"], data["quality_drop"], s=18, alpha=0.7)
@@ -227,6 +248,7 @@ def _scatter_plot(window_scores: pd.DataFrame, *, method: str, output_path: Path
 
 
 def _runtime_plot(runtimes: pd.DataFrame, output_path: Path) -> Path:
+    LOGGER.info("writing runtime plot path=%s rows=%d", output_path, len(runtimes))
     data = runtimes.copy()
     fig, ax = plt.subplots(figsize=(8, 4))
     data.boxplot(column="runtime_median", by="method", ax=ax, rot=45)
@@ -241,6 +263,7 @@ def _runtime_plot(runtimes: pd.DataFrame, output_path: Path) -> Path:
 
 
 def _ablation_plot(correlations: pd.DataFrame, output_path: Path) -> Path:
+    LOGGER.info("writing ablation plot path=%s rows=%d", output_path, len(correlations))
     data = correlations.dropna(subset=["spearman"])
     fig, ax = plt.subplots(figsize=(9, 4))
     if not data.empty:
@@ -256,6 +279,7 @@ def _ablation_plot(correlations: pd.DataFrame, output_path: Path) -> Path:
 
 
 def _retraining_regret_plot(summary: pd.DataFrame, output_path: Path) -> Path:
+    LOGGER.info("writing retraining regret plot path=%s rows=%d", output_path, len(summary))
     data = summary.copy()
     fig, ax = plt.subplots(figsize=(9, 4))
     if not data.empty:
@@ -272,4 +296,5 @@ def _retraining_regret_plot(summary: pd.DataFrame, output_path: Path) -> Path:
 
 def _write(frame: pd.DataFrame, path: Path) -> Path:
     frame.to_csv(path, index=False)
+    LOGGER.info("wrote report CSV path=%s rows=%d columns=%d", path, len(frame), len(frame.columns))
     return path

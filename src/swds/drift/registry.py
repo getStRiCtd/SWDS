@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import re
 from time import perf_counter
 from typing import Callable
@@ -12,6 +13,9 @@ from swds.drift.mmd import mmd_rbf_score
 from swds.drift.psi import max_psi_score, mean_psi_score
 from swds.drift.sinkhorn import sinkhorn_divergence_score
 from swds.drift.sliced_wasserstein import sliced_wasserstein_score
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -58,15 +62,25 @@ def compute_drift_scores(
 ) -> list[DriftScore]:
     methods = list(methods or DEFAULT_METHODS)
     registry = drift_method_registry(seed=seed)
+    LOGGER.debug(
+        "computing drift scores methods=%s seed=%d ref_shape=%s cur_shape=%s",
+        methods,
+        seed,
+        tuple(getattr(X_ref, "shape", ())),
+        tuple(getattr(X_cur, "shape", ())),
+    )
 
     results: list[DriftScore] = []
     for method in methods:
         scorer = registry.get(method) or _dynamic_method(method, seed=seed)
         if scorer is None:
+            LOGGER.error("unknown drift method requested method=%s", method)
             raise ValueError(f"unknown drift method: {method!r}")
+        LOGGER.debug("drift method started method=%s", method)
         started = perf_counter()
         score = float(scorer(X_ref, X_cur))
         elapsed = perf_counter() - started
+        LOGGER.debug("drift method completed method=%s score=%.8f runtime=%.4fs", method, score, elapsed)
         results.append(DriftScore(method=method, score=score, runtime_seconds=elapsed))
     return results
 
@@ -77,6 +91,7 @@ def _dynamic_method(method: str, *, seed: int) -> Callable | None:
         return None
     n_projections = int(match.group("k") or 128)
     n_quantiles = int(match.group("q") or 512)
+    LOGGER.debug("using dynamic SWDS method method=%s n_projections=%d n_quantiles=%d", method, n_projections, n_quantiles)
     return lambda a, b: sliced_wasserstein_score(
         a,
         b,

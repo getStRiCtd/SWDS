@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from scipy import sparse
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
@@ -7,6 +9,9 @@ from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostin
 from sklearn.linear_model import LogisticRegression, Ridge
 
 from swds.data.schema import TaskType
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class DenseInputEstimator(BaseEstimator):
@@ -37,6 +42,7 @@ class DenseInputRegressor(DenseInputEstimator, RegressorMixin):
 
 def make_model(task_type: TaskType, *, model_name: str = "linear", seed: int = 42):
     model_name = model_name.lower()
+    LOGGER.info("creating model name=%s task=%s seed=%d", model_name, TaskType(task_type).value, seed)
     if task_type == TaskType.CLASSIFICATION:
         if model_name == "linear":
             return LogisticRegression(
@@ -160,8 +166,16 @@ def make_model(task_type: TaskType, *, model_name: str = "linear", seed: int = 4
 
 
 def train_model(X_train, y_train, *, task_type: TaskType, model_name: str = "linear", seed: int = 42):
+    LOGGER.info(
+        "model training started name=%s task=%s rows=%d shape=%s",
+        model_name,
+        TaskType(task_type).value,
+        len(y_train),
+        tuple(getattr(X_train, "shape", ())),
+    )
     model = make_model(task_type, model_name=model_name, seed=seed)
     model.fit(X_train, y_train)
+    LOGGER.info("model training completed name=%s rows=%d", model_name, len(y_train))
     return model
 
 

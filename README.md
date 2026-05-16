@@ -12,6 +12,19 @@ uv sync
 uv run swds run-config --config configs/experiments/synthetic.yaml
 ```
 
+For status-heavy runs, enable structured logs. CLI logging options can be
+placed before or after the subcommand:
+
+```bash
+uv run swds --log-level INFO --log-file results/run.log \
+  run-config --config configs/experiments/synthetic.yaml
+```
+
+`SWDS_LOG_LEVEL` and `SWDS_LOG_FILE` provide the same controls. `INFO` logs
+dataset loading, preprocessing, training, scoring windows, thresholding,
+retraining simulation, downloads/preparation, and saved artifacts; `DEBUG`
+also records matrix shapes, per-method scores, and per-window metrics.
+
 The command writes:
 
 - `window_scores.csv`: one row per test window and drift method;

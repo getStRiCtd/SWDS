@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -19,6 +20,9 @@ from swds.models.train import train_model
 from swds.monitoring.retraining_policy import build_policy_triggers, simulate_retraining_policies
 from swds.monitoring.thresholds import quantile_threshold
 from swds.monitoring.windows import fixed_count_windows, fixed_time_windows
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,16 @@ def run_temporal_experiment(
     output_dir: str | Path | None = None,
 ) -> ExperimentResult:
     config = config or ExperimentConfig()
+    LOGGER.info(
+        "experiment started dataset=%s task=%s rows=%d features=%d model=%s output_dir=%s",
+        dataset.name,
+        TaskType(dataset.task_type).value,
+        len(dataset.frame),
+        len(dataset.feature_columns),
+        config.model_name,
+        output_dir,
+    )
+    LOGGER.debug("experiment config: %s", asdict(config))
     split = (
         official_split(dataset.frame, split_col=dataset.split_col)
         if dataset.split_col
@@ -75,23 +89,55 @@ def run_temporal_experiment(
             test_frac=config.test_frac,
         )
     )
+    LOGGER.info(
+        "temporal split ready dataset=%s train=%d val=%d test=%d split_col=%s",
+        dataset.name,
+        len(split.train),
+        len(split.val),
+        len(split.test),
+        dataset.split_col or "",
+    )
 
     feature_cols = dataset.feature_columns
+    LOGGER.info("building preprocessor dataset=%s feature_cols=%d", dataset.name, len(feature_cols))
     preprocessor, feature_summary = build_preprocessor(
         split.train,
         feature_cols,
         max_onehot_cardinality=config.max_onehot_cardinality,
         hash_features=config.hash_features,
     )
+    LOGGER.info(
+        "feature types dataset=%s numeric=%d low_card_categorical=%d high_card_categorical=%d",
+        dataset.name,
+        len(feature_summary.numeric),
+        len(feature_summary.low_cardinality_categorical),
+        len(feature_summary.high_cardinality_categorical),
+    )
+    LOGGER.info("fitting preprocessor dataset=%s train_rows=%d", dataset.name, len(split.train))
     preprocessor.fit(split.train[feature_cols])
 
+    LOGGER.info("transforming train/validation/test splits dataset=%s", dataset.name)
     X_train = transform_to_float32(preprocessor, split.train[feature_cols])
     X_val = transform_to_float32(preprocessor, split.val[feature_cols])
     X_test = transform_to_float32(preprocessor, split.test[feature_cols])
+    LOGGER.debug(
+        "transformed matrix shapes dataset=%s train=%s val=%s test=%s",
+        dataset.name,
+        _shape(X_train),
+        _shape(X_val),
+        _shape(X_test),
+    )
     y_train = split.train[dataset.target_col].to_numpy()
     y_val = split.val[dataset.target_col].to_numpy()
     y_test = split.test[dataset.target_col].to_numpy()
 
+    LOGGER.info(
+        "training model dataset=%s model=%s task=%s train_rows=%d",
+        dataset.name,
+        config.model_name,
+        TaskType(dataset.task_type).value,
+        len(y_train),
+    )
     model = train_model(
         X_train,
         y_train,
@@ -99,9 +145,18 @@ def run_temporal_experiment(
         model_name=config.model_name,
         seed=config.seed,
     )
+    LOGGER.info("evaluating validation split dataset=%s val_rows=%d", dataset.name, len(y_val))
     val_metrics = evaluate_model(model, X_val, y_val, task_type=dataset.task_type)
     metric_name = primary_metric(dataset.task_type, val_metrics)
     ref_quality = float(val_metrics.get(metric_name, np.nan))
+    LOGGER.info(
+        "validation quality dataset=%s metric=%s value=%.6f metrics=%s",
+        dataset.name,
+        metric_name,
+        ref_quality,
+        val_metrics,
+    )
+    LOGGER.info("building drift representation dataset=%s mode=%s", dataset.name, config.drift_representation)
     X_train_drift, X_val_drift, X_test_drift = _make_drift_representation(
         model=model,
         X_train=X_train,
@@ -109,9 +164,23 @@ def run_temporal_experiment(
         X_test=X_test,
         config=config,
     )
+    LOGGER.debug(
+        "drift representation shapes dataset=%s train=%s val=%s test=%s",
+        dataset.name,
+        _shape(X_train_drift),
+        _shape(X_val_drift),
+        _shape(X_test_drift),
+    )
 
     val_windows = _make_windows(split.val, dataset.time_col, config=config, prefix="V")
     test_windows = _make_windows(split.test, dataset.time_col, config=config, prefix="W")
+    LOGGER.info(
+        "monitoring windows ready dataset=%s validation_windows=%d test_windows=%d mode=%s",
+        dataset.name,
+        len(val_windows),
+        len(test_windows),
+        config.window_mode,
+    )
 
     validation_scores = _score_windows(
         X_ref=X_train_drift,
@@ -126,8 +195,17 @@ def run_temporal_experiment(
         reference_quality=ref_quality,
         stream_name="validation",
     )
+    LOGGER.info(
+        "calibrating thresholds dataset=%s quantile=%.4f validation_rows=%d",
+        dataset.name,
+        config.threshold_quantile,
+        len(validation_scores),
+    )
     thresholds = _calibrate_thresholds(validation_scores, config.threshold_quantile)
+    LOGGER.info("threshold calibration completed dataset=%s methods=%d", dataset.name, len(thresholds))
+    LOGGER.debug("thresholds dataset=%s values=%s", dataset.name, thresholds)
     test_recent_reference = _initial_recent_reference(X_val_drift, val_windows, config=config)
+    LOGGER.debug("initial recent reference blocks dataset=%s count=%d", dataset.name, len(test_recent_reference))
 
     window_scores = _score_windows(
         X_ref=X_train_drift,
@@ -144,13 +222,16 @@ def run_temporal_experiment(
         thresholds=thresholds,
         initial_recent_reference=test_recent_reference,
     )
+    LOGGER.info("computing drift-quality correlations dataset=%s rows=%d", dataset.name, len(window_scores))
     correlations = drift_quality_correlations(window_scores)
     correlations.insert(0, "dataset", dataset.name)
     correlations.insert(1, "model", config.model_name)
+    LOGGER.info("correlations completed dataset=%s rows=%d", dataset.name, len(correlations))
 
     retraining_windows = pd.DataFrame()
     retraining_summary = pd.DataFrame()
     if config.run_retraining and len(test_windows):
+        LOGGER.info("retraining simulation enabled dataset=%s test_windows=%d", dataset.name, len(test_windows))
         retraining = _run_retraining_simulation(
             X_train=X_train,
             y_train=y_train,
@@ -164,7 +245,21 @@ def run_temporal_experiment(
         )
         retraining_windows = retraining.windows
         retraining_summary = retraining.summary
+        LOGGER.info(
+            "retraining simulation completed dataset=%s window_rows=%d summary_rows=%d",
+            dataset.name,
+            len(retraining_windows),
+            len(retraining_summary),
+        )
+    else:
+        LOGGER.info(
+            "retraining simulation skipped dataset=%s run_retraining=%s test_windows=%d",
+            dataset.name,
+            config.run_retraining,
+            len(test_windows),
+        )
 
+    LOGGER.info("building dataset summary dataset=%s", dataset.name)
     summary = _dataset_summary(dataset, split, feature_summary, test_windows, metric_name)
     summary["window_mode"] = config.window_mode
     summary["reference_mode"] = config.reference_mode
@@ -179,21 +274,25 @@ def run_temporal_experiment(
     )
     if output_dir is not None:
         save_experiment_result(result, output_dir=output_dir, config=config)
+    LOGGER.info("experiment completed dataset=%s output_dir=%s", dataset.name, output_dir)
     return result
 
 
 def save_experiment_result(result: ExperimentResult, *, output_dir: str | Path, config: ExperimentConfig) -> None:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    result.window_scores.to_csv(output / "window_scores.csv", index=False)
-    result.validation_scores.to_csv(output / "validation_scores.csv", index=False)
-    result.correlations.to_csv(output / "correlations.csv", index=False)
-    result.dataset_summary.to_csv(output / "dataset_summary.csv", index=False)
+    LOGGER.info("saving experiment result output_dir=%s", output)
+    _write_csv(result.window_scores, output / "window_scores.csv")
+    _write_csv(result.validation_scores, output / "validation_scores.csv")
+    _write_csv(result.correlations, output / "correlations.csv")
+    _write_csv(result.dataset_summary, output / "dataset_summary.csv")
     if not result.retraining_windows.empty:
-        result.retraining_windows.to_csv(output / "retraining_policy_windows.csv", index=False)
+        _write_csv(result.retraining_windows, output / "retraining_policy_windows.csv")
     if not result.retraining_summary.empty:
-        result.retraining_summary.to_csv(output / "retraining_policy_summary.csv", index=False)
-    pd.DataFrame([asdict(config)]).to_json(output / "config.json", orient="records", indent=2)
+        _write_csv(result.retraining_summary, output / "retraining_policy_summary.csv")
+    config_path = output / "config.json"
+    pd.DataFrame([asdict(config)]).to_json(config_path, orient="records", indent=2)
+    LOGGER.info("wrote config JSON path=%s", config_path)
 
 
 def _score_windows(
@@ -212,6 +311,14 @@ def _score_windows(
     thresholds: dict[str, float] | None = None,
     initial_recent_reference: list | None = None,
 ) -> pd.DataFrame:
+    LOGGER.info(
+        "scoring windows dataset=%s stream=%s windows=%d methods=%s reference_mode=%s",
+        dataset.name,
+        stream_name,
+        len(windows),
+        ",".join(config.methods),
+        config.reference_mode,
+    )
     rows = []
     recent_reference = list(initial_recent_reference) if initial_recent_reference is not None else [X_ref]
     for window in windows:
@@ -223,12 +330,41 @@ def _score_windows(
             recent_reference=recent_reference,
             config=config,
         )
+        LOGGER.info(
+            "scoring window dataset=%s stream=%s label=%s index=%d rows=%d reference_rows=%d",
+            dataset.name,
+            stream_name,
+            window.label,
+            window.index,
+            window.size,
+            int(X_ref_cur.shape[0]),
+        )
         metrics = evaluate_model(model, X_model_cur, y_cur, task_type=dataset.task_type)
         current_quality = float(metrics.get(metric_name, np.nan))
         drop = quality_drop(reference_quality, current_quality, metric_name=metric_name)
+        LOGGER.debug(
+            "window quality dataset=%s stream=%s label=%s metric=%s value=%.6f drop=%.6f metrics=%s",
+            dataset.name,
+            stream_name,
+            window.label,
+            metric_name,
+            current_quality,
+            drop,
+            metrics,
+        )
         drift_scores = compute_drift_scores(X_ref_cur, X_cur, methods=config.methods, seed=config.seed)
         for drift_score in drift_scores:
             threshold = None if thresholds is None else thresholds.get(drift_score.method)
+            LOGGER.debug(
+                "drift score dataset=%s stream=%s label=%s method=%s score=%.8f threshold=%s runtime=%.4fs",
+                dataset.name,
+                stream_name,
+                window.label,
+                drift_score.method,
+                drift_score.score,
+                threshold,
+                drift_score.runtime_seconds,
+            )
             rows.append(
                 {
                     "dataset": dataset.name,
@@ -257,7 +393,20 @@ def _score_windows(
         if config.reference_mode == "recent":
             recent_reference.append(X_cur)
             recent_reference = recent_reference[-max(config.recent_reference_windows, 1) :]
-    return pd.DataFrame(rows)
+            LOGGER.debug(
+                "recent reference updated dataset=%s stream=%s blocks=%d",
+                dataset.name,
+                stream_name,
+                len(recent_reference),
+            )
+    out = pd.DataFrame(rows)
+    LOGGER.info(
+        "scoring windows completed dataset=%s stream=%s rows=%d",
+        dataset.name,
+        stream_name,
+        len(out),
+    )
+    return out
 
 
 def _run_retraining_simulation(
@@ -272,6 +421,14 @@ def _run_retraining_simulation(
     config: ExperimentConfig,
     metric_name: str,
 ):
+    LOGGER.info(
+        "building retraining inputs dataset=%s windows=%d methods=%s periods=%s histories=%s",
+        dataset.name,
+        len(test_windows),
+        ",".join(config.methods),
+        config.retraining_periods,
+        config.retraining_history_modes,
+    )
     X_windows = [X_test[window.start : window.end] for window in test_windows]
     y_windows = [y_test[window.start : window.end] for window in test_windows]
     per_window = (
@@ -285,6 +442,8 @@ def _run_retraining_simulation(
         periods=tuple(config.retraining_periods),
         oracle_min_quality_drop=config.oracle_min_quality_drop,
     )
+    trigger_counts = {name: int(values.sum()) for name, values in triggers.items()}
+    LOGGER.info("retraining triggers ready dataset=%s trigger_counts=%s", dataset.name, trigger_counts)
     simulation = simulate_retraining_policies(
         X_initial=X_train,
         y_initial=y_train,
@@ -313,21 +472,38 @@ def _calibrate_thresholds(validation_scores: pd.DataFrame, quantile: float) -> d
         scores = group["score"].replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
         if len(scores):
             thresholds[method] = quantile_threshold(scores, quantile=quantile)
+            LOGGER.info(
+                "threshold calibrated method=%s quantile=%.4f value=%.8f n_scores=%d",
+                method,
+                quantile,
+                thresholds[method],
+                len(scores),
+            )
+        else:
+            LOGGER.warning("threshold skipped method=%s reason=no finite validation scores", method)
     return thresholds
 
 
 def _make_drift_representation(*, model, X_train, X_val, X_test, config: ExperimentConfig):
     mode = config.drift_representation
     if mode == "raw":
+        LOGGER.info("using raw drift representation")
         return X_train, X_val, X_test
     if mode == "pca":
         n_components = min(config.pca_components, X_train.shape[1], max(X_train.shape[0] - 1, 1))
         if n_components < 1:
+            LOGGER.warning("PCA representation skipped because n_components < 1")
             return X_train, X_val, X_test
-        reducer = TruncatedSVD(n_components=n_components, random_state=config.seed) if sparse.issparse(X_train) else PCA(n_components=n_components, random_state=config.seed)
+        LOGGER.info("fitting PCA/SVD drift representation components=%d", n_components)
+        reducer = (
+            TruncatedSVD(n_components=n_components, random_state=config.seed)
+            if sparse.issparse(X_train)
+            else PCA(n_components=n_components, random_state=config.seed)
+        )
         reducer.fit(X_train)
         return reducer.transform(X_train), reducer.transform(X_val), reducer.transform(X_test)
     if mode in {"model_output", "model_aware"}:
+        LOGGER.info("building model-output drift representation")
         return (
             _model_output_representation(model, X_train),
             _model_output_representation(model, X_val),
@@ -346,20 +522,38 @@ def _model_output_representation(model, X) -> np.ndarray:
 
 def _make_windows(frame: pd.DataFrame, time_col: str, *, config: ExperimentConfig, prefix: str):
     if config.window_mode == "count":
-        return fixed_count_windows(
+        windows = fixed_count_windows(
             len(frame),
             window_size=config.window_size,
             min_size=config.min_window_size,
             prefix=prefix,
         )
+        LOGGER.info(
+            "fixed-count windows built prefix=%s rows=%d window_size=%d min_size=%d count=%d",
+            prefix,
+            len(frame),
+            config.window_size,
+            config.min_window_size,
+            len(windows),
+        )
+        return windows
     if config.window_mode == "time":
-        return fixed_time_windows(
+        windows = fixed_time_windows(
             frame,
             time_col=time_col,
             freq=config.window_time_freq,
             min_size=config.min_window_size,
             prefix=prefix,
         )
+        LOGGER.info(
+            "fixed-time windows built prefix=%s rows=%d freq=%s min_size=%d count=%d",
+            prefix,
+            len(frame),
+            config.window_time_freq,
+            config.min_window_size,
+            len(windows),
+        )
+        return windows
     raise ValueError("window_mode must be either 'count' or 'time'")
 
 
@@ -368,6 +562,7 @@ def _initial_recent_reference(X_val, val_windows, *, config: ExperimentConfig) -
         return []
     n_recent = max(config.recent_reference_windows, 1)
     selected_windows = val_windows[-n_recent:]
+    LOGGER.info("initial recent reference selected windows=%d", len(selected_windows))
     return [X_val[window.start : window.end] for window in selected_windows]
 
 
@@ -387,6 +582,13 @@ def _dataset_summary(dataset, split, feature_summary, test_windows, metric_name:
     features = dataset.feature_columns
     missing_rate = float(frame[features].isna().mean().mean()) if features else 0.0
     time_values = frame[dataset.time_col]
+    LOGGER.info(
+        "dataset summary ready dataset=%s n_samples=%d n_features=%d missing_rate=%.6f",
+        dataset.name,
+        len(frame),
+        len(features),
+        missing_rate,
+    )
     return pd.DataFrame(
         [
             {
@@ -409,3 +611,12 @@ def _dataset_summary(dataset, split, feature_summary, test_windows, metric_name:
             }
         ]
     )
+
+
+def _write_csv(frame: pd.DataFrame, path: Path) -> None:
+    frame.to_csv(path, index=False)
+    LOGGER.info("wrote CSV path=%s rows=%d columns=%d", path, len(frame), len(frame.columns))
+
+
+def _shape(matrix) -> tuple[int, ...]:
+    return tuple(getattr(matrix, "shape", ()))

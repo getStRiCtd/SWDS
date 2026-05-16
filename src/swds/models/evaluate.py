@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
@@ -15,10 +17,17 @@ from sklearn.metrics import (
 from swds.data.schema import TaskType
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def evaluate_model(model, X, y_true, *, task_type: TaskType) -> dict[str, float]:
+    LOGGER.debug("evaluating model task=%s rows=%d shape=%s", TaskType(task_type).value, len(y_true), tuple(getattr(X, "shape", ())))
     if task_type == TaskType.CLASSIFICATION:
-        return classification_metrics(model, X, y_true)
-    return regression_metrics(model, X, y_true)
+        metrics = classification_metrics(model, X, y_true)
+    else:
+        metrics = regression_metrics(model, X, y_true)
+    LOGGER.debug("model evaluation completed metrics=%s", metrics)
+    return metrics
 
 
 def classification_metrics(model, X, y_true) -> dict[str, float]:

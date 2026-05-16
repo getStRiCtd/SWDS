@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -15,19 +16,32 @@ from swds.experiments.synthetic_drift import SyntheticDriftExperimentConfig
 from swds.experiments.synthetic import SyntheticSpec, make_synthetic_temporal_dataset
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def load_experiment_yaml(path: str | Path) -> dict[str, Any]:
+    LOGGER.info("reading experiment YAML path=%s", path)
     with Path(path).open("r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
     if not isinstance(config, dict):
+        LOGGER.error("experiment config is not a mapping path=%s", path)
         raise ValueError(f"experiment config must be a mapping: {path}")
+    LOGGER.info("experiment YAML loaded path=%s keys=%s", path, sorted(config))
     return config
 
 
 def load_dataset_from_experiment_config(config: dict[str, Any]):
     dataset_spec = dict(config.get("dataset", {}))
     dataset_type = str(dataset_spec.get("type", "csv")).lower()
+    LOGGER.info("loading dataset from experiment config type=%s", dataset_type)
     if dataset_type == "synthetic":
         task_type = normalize_task_type(dataset_spec.get("task_type", dataset_spec.get("task", "classification")))
+        LOGGER.info(
+            "generating configured synthetic dataset n_samples=%s task=%s seed=%s",
+            dataset_spec.get("n_samples", 12000),
+            TaskType(task_type).value,
+            dataset_spec.get("seed", config.get("seed", 42)),
+        )
         dataset, _ = make_synthetic_temporal_dataset(
             SyntheticSpec(
                 n_samples=int(dataset_spec.get("n_samples", 12000)),
@@ -39,6 +53,7 @@ def load_dataset_from_experiment_config(config: dict[str, Any]):
             )
         )
         if "name" in dataset_spec:
+            LOGGER.info("renaming configured synthetic dataset name=%s", dataset_spec["name"])
             dataset = type(dataset)(
                 name=dataset_spec["name"],
                 frame=dataset.frame,
@@ -48,6 +63,7 @@ def load_dataset_from_experiment_config(config: dict[str, Any]):
                 split_col=dataset.split_col,
                 source=dataset.source,
             )
+        LOGGER.info("configured synthetic dataset ready name=%s rows=%d", dataset.name, dataset.n_samples)
         return dataset
     return load_dataset_from_spec(dataset_spec)
 
@@ -70,7 +86,10 @@ def experiment_config_from_mapping(config: dict[str, Any]) -> ExperimentConfig:
     for key in ("methods", "retraining_periods", "retraining_history_modes"):
         if key in values and not isinstance(values[key], tuple):
             values[key] = tuple(values[key])
-    return ExperimentConfig(**values)
+    out = ExperimentConfig(**values)
+    LOGGER.info("experiment config parsed model=%s methods=%s window_size=%d", out.model_name, out.methods, out.window_size)
+    LOGGER.debug("experiment config values=%s", out)
+    return out
 
 
 def synthetic_drift_config_from_mapping(config: dict[str, Any]) -> SyntheticDriftExperimentConfig:
@@ -94,7 +113,10 @@ def synthetic_drift_config_from_mapping(config: dict[str, Any]) -> SyntheticDrif
     for key in ("methods", "scenarios"):
         if key in values and not isinstance(values[key], tuple):
             values[key] = tuple(values[key])
-    return SyntheticDriftExperimentConfig(**values)
+    out = SyntheticDriftExperimentConfig(**values)
+    LOGGER.info("synthetic drift config parsed scenarios=%s methods=%s", out.scenarios, out.methods)
+    LOGGER.debug("synthetic drift config values=%s", out)
+    return out
 
 
 def ablation_config_from_mapping(config: dict[str, Any]) -> AblationConfig:
@@ -104,7 +126,10 @@ def ablation_config_from_mapping(config: dict[str, Any]) -> AblationConfig:
     for key in ("projection_counts", "window_sizes", "threshold_quantiles", "reference_modes", "representation_modes"):
         if key in values and not isinstance(values[key], tuple):
             values[key] = tuple(values[key])
-    return AblationConfig(**values)
+    out = AblationConfig(**values)
+    LOGGER.info("ablation config parsed")
+    LOGGER.debug("ablation config values=%s", out)
+    return out
 
 
 def output_dir_from_config(config: dict[str, Any], default: str = "results/config_run") -> str:

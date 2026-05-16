@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -7,6 +8,9 @@ import pandas as pd
 
 from swds.data.schema import TabularDataset
 from swds.experiments.pipeline import ExperimentConfig, ExperimentResult, run_temporal_experiment
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,13 @@ def run_ablation_experiment(
     output_dir: str | Path | None = None,
 ) -> AblationResult:
     config = config or AblationConfig()
+    LOGGER.info(
+        "ablation experiment started dataset=%s rows=%d output_dir=%s",
+        dataset.name,
+        dataset.n_samples,
+        output_dir,
+    )
+    LOGGER.debug("ablation config: %s", asdict(config))
     runs: list[tuple[str, str, ExperimentConfig]] = []
 
     if config.run_projection_count:
@@ -95,8 +106,15 @@ def run_ablation_experiment(
     runtime_tables = []
     retraining_tables = []
     run_rows = []
+    LOGGER.info("ablation runs planned count=%d", len(runs))
 
     for run_id, (ablation_type, ablation_value, run_config) in enumerate(runs):
+        LOGGER.info(
+            "ablation run started run_id=%d type=%s value=%s",
+            run_id,
+            ablation_type,
+            ablation_value,
+        )
         result = run_temporal_experiment(dataset, config=run_config)
         correlation_tables.append(_annotate(result.correlations, run_id, ablation_type, ablation_value))
         runtime_tables.append(
@@ -118,6 +136,13 @@ def run_ablation_experiment(
                 **asdict(run_config),
             }
         )
+        LOGGER.info(
+            "ablation run completed run_id=%d correlations=%d runtime_rows=%d retraining_rows=%d",
+            run_id,
+            len(result.correlations),
+            len(result.window_scores),
+            len(result.retraining_summary),
+        )
 
     output = AblationResult(
         correlations=_concat(correlation_tables),
@@ -127,18 +152,22 @@ def run_ablation_experiment(
     )
     if output_dir is not None:
         save_ablation_result(output, output_dir=output_dir, config=config)
+    LOGGER.info("ablation experiment completed dataset=%s runs=%d output_dir=%s", dataset.name, len(runs), output_dir)
     return output
 
 
 def save_ablation_result(result: AblationResult, *, output_dir: str | Path, config: AblationConfig) -> None:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    result.correlations.to_csv(output / "ablation_correlations.csv", index=False)
-    result.runtimes.to_csv(output / "ablation_runtimes.csv", index=False)
+    LOGGER.info("saving ablation result output_dir=%s", output)
+    _write_csv(result.correlations, output / "ablation_correlations.csv")
+    _write_csv(result.runtimes, output / "ablation_runtimes.csv")
     if not result.retraining.empty:
-        result.retraining.to_csv(output / "ablation_retraining.csv", index=False)
-    result.run_index.to_csv(output / "ablation_runs.csv", index=False)
-    pd.DataFrame([asdict(config)]).to_json(output / "ablation_config.json", orient="records", indent=2)
+        _write_csv(result.retraining, output / "ablation_retraining.csv")
+    _write_csv(result.run_index, output / "ablation_runs.csv")
+    config_path = output / "ablation_config.json"
+    pd.DataFrame([asdict(config)]).to_json(config_path, orient="records", indent=2)
+    LOGGER.info("wrote ablation config path=%s", config_path)
 
 
 def _annotate(frame: pd.DataFrame, run_id: int, ablation_type: str, ablation_value: str) -> pd.DataFrame:
@@ -168,3 +197,8 @@ def _concat(tables: list[pd.DataFrame]) -> pd.DataFrame:
     if not tables:
         return pd.DataFrame()
     return pd.concat(tables, ignore_index=True)
+
+
+def _write_csv(frame: pd.DataFrame, path: Path) -> None:
+    frame.to_csv(path, index=False)
+    LOGGER.info("wrote CSV path=%s rows=%d columns=%d", path, len(frame), len(frame.columns))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 
 import numpy as np
@@ -7,10 +8,15 @@ import pandas as pd
 from scipy.stats import ConstantInputWarning, friedmanchisquare, kendalltau, spearmanr, wilcoxon
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def drift_quality_correlations(window_scores: pd.DataFrame, *, bootstrap_samples: int = 500, seed: int = 42) -> pd.DataFrame:
+    LOGGER.info("computing drift-quality correlations rows=%d methods=%d", len(window_scores), window_scores["method"].nunique() if "method" in window_scores else 0)
     rows = []
     for method, group in window_scores.groupby("method", sort=True):
         clean = group[["window_index", "score", "quality_drop"]].replace([np.inf, -np.inf], np.nan).dropna()
+        LOGGER.debug("correlation method started method=%s rows=%d clean_rows=%d", method, len(group), len(clean))
         if len(clean) < 3:
             spearman = kendall = float("nan")
             ci_low = ci_high = float("nan")
@@ -40,7 +46,10 @@ def drift_quality_correlations(window_scores: pd.DataFrame, *, bootstrap_samples
                 "n_windows": n,
             }
         )
-    return pd.DataFrame(rows).sort_values("spearman", ascending=False, na_position="last")
+        LOGGER.debug("correlation method completed method=%s spearman=%s kendall=%s n=%d", method, spearman, kendall, n)
+    out = pd.DataFrame(rows).sort_values("spearman", ascending=False, na_position="last")
+    LOGGER.info("drift-quality correlations completed rows=%d", len(out))
+    return out
 
 
 def spearman_bootstrap_ci(x, y, *, n_bootstrap: int = 1000, seed: int = 42, alpha: float = 0.05) -> tuple[float, float]:
@@ -108,8 +117,10 @@ def pairwise_wilcoxon_vs_reference(
     value_col: str = "spearman",
     pair_col: str = "dataset_model",
 ) -> pd.DataFrame:
+    LOGGER.info("running pairwise Wilcoxon reference_method=%s rows=%d", reference_method, len(paired_scores))
     pivot = paired_scores.pivot(index=pair_col, columns="method", values=value_col)
     if reference_method not in pivot.columns:
+        LOGGER.error("Wilcoxon reference method absent reference_method=%s", reference_method)
         raise ValueError(f"reference method {reference_method!r} is absent")
 
     rows = []
@@ -129,6 +140,7 @@ def pairwise_wilcoxon_vs_reference(
         correction = benjamini_hochberg(out["p_value"].fillna(1.0).to_numpy())
         out["p_value_bh"] = correction["p_value_bh"]
         out["reject_bh"] = correction["reject_bh"]
+    LOGGER.info("pairwise Wilcoxon completed rows=%d", len(out))
     return out
 
 
@@ -138,10 +150,13 @@ def friedman_test_by_pair(
     value_col: str = "spearman",
     pair_col: str = "dataset_model",
 ) -> pd.DataFrame:
+    LOGGER.info("running Friedman test rows=%d", len(paired_scores))
     pivot = paired_scores.pivot(index=pair_col, columns="method", values=value_col).dropna()
     if pivot.shape[0] < 2 or pivot.shape[1] < 3:
+        LOGGER.warning("Friedman test skipped n_pairs=%d n_methods=%d", pivot.shape[0], pivot.shape[1])
         return pd.DataFrame([{"friedman_stat": np.nan, "p_value": np.nan, "n_pairs": pivot.shape[0], "n_methods": pivot.shape[1]}])
     stat, p_value = friedmanchisquare(*[pivot[col].to_numpy(dtype=float) for col in pivot.columns])
+    LOGGER.info("Friedman test completed stat=%.6f p_value=%.6f n_pairs=%d n_methods=%d", float(stat), float(p_value), int(pivot.shape[0]), int(pivot.shape[1]))
     return pd.DataFrame(
         [
             {

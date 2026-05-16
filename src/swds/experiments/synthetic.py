@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from swds.data.schema import TabularDataset, TaskType
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,14 @@ class SyntheticSpec:
 
 def make_synthetic_temporal_dataset(spec: SyntheticSpec | None = None) -> tuple[TabularDataset, int]:
     spec = spec or SyntheticSpec()
+    LOGGER.info(
+        "synthetic dataset generation started n_samples=%d numeric=%d categorical=%d task=%s seed=%d",
+        spec.n_samples,
+        spec.n_numeric,
+        spec.n_categorical,
+        spec.task_type.value,
+        spec.seed,
+    )
     rng = np.random.default_rng(spec.seed)
     n = spec.n_samples
     drift_start = int(n * spec.drift_start_frac)
@@ -77,5 +89,11 @@ def make_synthetic_temporal_dataset(spec: SyntheticSpec | None = None) -> tuple[
         time_col="time",
         task_type=spec.task_type,
         source="generated",
+    )
+    LOGGER.info(
+        "synthetic dataset generation completed rows=%d columns=%d drift_start_row=%d",
+        len(frame),
+        len(frame.columns),
+        drift_start,
     )
     return dataset, drift_start

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -8,6 +9,9 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "matplot
 
 import matplotlib.pyplot as plt
 import pandas as pd
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def timeline_plot(
@@ -19,10 +23,12 @@ def timeline_plot(
 ) -> Path:
     data = window_scores.loc[window_scores["method"] == method].sort_values("window_index")
     if data.empty:
+        LOGGER.error("timeline plot cannot be built because method is absent method=%s", method)
         raise ValueError(f"method {method!r} is absent from window_scores")
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("writing timeline plot path=%s method=%s rows=%d", output, method, len(data))
 
     fig, ax_score = plt.subplots(figsize=(9, 4))
     ax_quality = ax_score.twinx()
@@ -42,6 +48,7 @@ def timeline_plot(
     fig.tight_layout()
     fig.savefig(output, dpi=180)
     plt.close(fig)
+    LOGGER.info("timeline plot written path=%s", output)
     return output
 
 
@@ -49,6 +56,7 @@ def correlation_boxplot(correlations: pd.DataFrame, *, output_path: str | Path) 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     data = correlations.sort_values("method")
+    LOGGER.info("writing correlation boxplot path=%s rows=%d", output, len(data))
 
     fig, ax = plt.subplots(figsize=(8, 4))
     data.boxplot(column="spearman", by="method", ax=ax, rot=45)
@@ -59,4 +67,5 @@ def correlation_boxplot(correlations: pd.DataFrame, *, output_path: str | Path) 
     fig.tight_layout()
     fig.savefig(output, dpi=180)
     plt.close(fig)
+    LOGGER.info("correlation boxplot written path=%s", output)
     return output

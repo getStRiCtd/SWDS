@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 TABRED_REPO_URL = "https://github.com/yandex-research/tabred.git"
@@ -42,31 +46,54 @@ def prepare_tabred(
     repo = Path(repo_dir)
     output = Path(output_root)
     selected = _normalize_datasets(datasets)
+    LOGGER.info(
+        "TabReD preparation started repo=%s output_root=%s datasets=%s clone_if_missing=%s link=%s",
+        repo,
+        output,
+        selected,
+        clone_if_missing,
+        link,
+    )
 
     if clone_if_missing and not repo.exists():
         repo.parent.mkdir(parents=True, exist_ok=True)
+        LOGGER.info("cloning TabReD repository url=%s target=%s", TABRED_REPO_URL, repo)
         subprocess.run(["git", "clone", "--depth", "1", TABRED_REPO_URL, str(repo)], check=True)
+        LOGGER.info("TabReD repository cloned target=%s", repo)
     if not repo.exists():
+        LOGGER.error("TabReD repository missing path=%s", repo)
         raise FileNotFoundError(f"TabReD repository not found: {repo}")
 
+    LOGGER.info("checking TabReD preprocessing runtime repo=%s", repo)
     _check_tabred_runtime(repo)
     output.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("TabReD output root ready path=%s", output)
 
     results: list[TabReDPrepareResult] = []
     for dataset in selected:
         script = TABRED_DATASETS[dataset]
         source = repo / "data" / dataset
         target = output / dataset
+        LOGGER.info(
+            "TabReD dataset preparation started dataset=%s script=%s source=%s target=%s",
+            dataset,
+            script,
+            source,
+            target,
+        )
 
         if not source.exists():
             try:
+                LOGGER.info("running TabReD preprocessing script dataset=%s script=%s", dataset, script)
                 subprocess.run(
                     ["python", f"preprocessing/{script}"],
                     cwd=repo,
                     check=True,
                     env=_tabred_env(repo),
                 )
+                LOGGER.info("TabReD preprocessing script completed dataset=%s", dataset)
             except subprocess.CalledProcessError as exc:
+                LOGGER.exception("TabReD preprocessing script failed dataset=%s exit_code=%s", dataset, exc.returncode)
                 results.append(
                     TabReDPrepareResult(
                         dataset=dataset,
@@ -77,8 +104,11 @@ def prepare_tabred(
                     )
                 )
                 continue
+        else:
+            LOGGER.info("TabReD processed source already exists dataset=%s source=%s", dataset, source)
 
         if not _looks_like_tabred_dataset(source):
+            LOGGER.error("TabReD expected files missing dataset=%s source=%s", dataset, source)
             results.append(
                 TabReDPrepareResult(
                     dataset=dataset,
@@ -90,7 +120,9 @@ def prepare_tabred(
             )
             continue
 
+        LOGGER.info("linking/copying TabReD dataset dataset=%s link=%s", dataset, link)
         _link_or_copy(source, target, link=link)
+        LOGGER.info("TabReD dataset ready dataset=%s target=%s", dataset, target)
         results.append(
             TabReDPrepareResult(
                 dataset=dataset,
@@ -101,15 +133,18 @@ def prepare_tabred(
             )
         )
 
+    LOGGER.info("TabReD preparation completed datasets=%d", len(results))
     return results
 
 
 def validate_tabred_root(root: str | Path = "data/raw/tabred") -> list[TabReDPrepareResult]:
     root = Path(root)
+    LOGGER.info("validating TabReD root path=%s", root)
     results = []
     for dataset in TABRED_DATASETS:
         target = root / dataset
         status = "completed" if _looks_like_tabred_dataset(target) else "missing"
+        LOGGER.info("TabReD validation dataset=%s status=%s target=%s", dataset, status, target)
         results.append(
             TabReDPrepareResult(
                 dataset=dataset,
@@ -136,6 +171,9 @@ def _check_tabred_runtime(repo: Path) -> None:
     for module in ("kaggle", "polars", "loguru", "openpyxl"):
         if find_spec(module) is None:
             missing.append(module)
+            LOGGER.warning("TabReD dependency missing module=%s", module)
+        else:
+            LOGGER.debug("TabReD dependency available module=%s", module)
     if missing:
         raise ImportError(
             "TabReD preprocessing dependencies are missing: "
@@ -143,13 +181,16 @@ def _check_tabred_runtime(repo: Path) -> None:
             + ". Install them with `uv sync --extra tabred`."
         )
     if not _has_kaggle_credentials():
+        LOGGER.error("Kaggle credentials missing for TabReD preprocessing")
         raise FileNotFoundError(
             "Kaggle credentials are missing. Put kaggle.json in ~/.kaggle/ or set "
             "KAGGLE_USERNAME and KAGGLE_KEY. You must also accept the relevant Kaggle "
             "competition/dataset rules before preprocessing can download TabReD."
         )
     if not (repo / "preprocessing").exists():
+        LOGGER.error("TabReD preprocessing directory missing repo=%s", repo)
         raise FileNotFoundError(f"TabReD preprocessing directory is absent in {repo}")
+    LOGGER.info("TabReD runtime check passed repo=%s", repo)
 
 
 def _has_kaggle_credentials() -> bool:
@@ -179,12 +220,16 @@ def _looks_like_tabred_dataset(path: Path) -> bool:
 
 def _link_or_copy(source: Path, target: Path, *, link: bool) -> None:
     if target.exists() or target.is_symlink():
+        LOGGER.info("TabReD target already exists target=%s", target)
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     if link:
         try:
             target.symlink_to(source.resolve(), target_is_directory=True)
+            LOGGER.info("created TabReD symlink source=%s target=%s", source, target)
             return
-        except OSError:
+        except OSError as exc:
+            LOGGER.warning("failed to create TabReD symlink source=%s target=%s error=%s", source, target, exc)
             pass
     shutil.copytree(source, target)
+    LOGGER.info("copied TabReD dataset source=%s target=%s", source, target)

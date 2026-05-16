@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -12,6 +13,9 @@ from sklearn.feature_extraction import FeatureHasher
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,8 @@ def infer_feature_types(
     *,
     max_onehot_cardinality: int = 32,
 ) -> FeatureTypeSummary:
+    columns = list(columns)
+    LOGGER.info("inferring feature types columns=%d max_onehot_cardinality=%d", len(columns), max_onehot_cardinality)
     numeric: list[str] = []
     low_card: list[str] = []
     high_card: list[str] = []
@@ -87,11 +93,18 @@ def infer_feature_types(
         else:
             high_card.append(col)
 
-    return FeatureTypeSummary(
+    summary = FeatureTypeSummary(
         numeric=numeric,
         low_cardinality_categorical=low_card,
         high_cardinality_categorical=high_card,
     )
+    LOGGER.info(
+        "feature type inference completed numeric=%d low_card_categorical=%d high_card_categorical=%d",
+        len(summary.numeric),
+        len(summary.low_cardinality_categorical),
+        len(summary.high_cardinality_categorical),
+    )
+    return summary
 
 
 def build_preprocessor(
@@ -101,6 +114,12 @@ def build_preprocessor(
     max_onehot_cardinality: int = 32,
     hash_features: int = 256,
 ) -> tuple[ColumnTransformer, FeatureTypeSummary]:
+    LOGGER.info(
+        "building preprocessor train_rows=%d feature_columns=%d hash_features=%d",
+        len(train_frame),
+        len(feature_columns),
+        hash_features,
+    )
     summary = infer_feature_types(
         train_frame,
         feature_columns,
@@ -109,6 +128,7 @@ def build_preprocessor(
     transformers = []
 
     if summary.numeric:
+        LOGGER.info("adding numeric preprocessing columns=%d", len(summary.numeric))
         numeric_pipeline = Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
@@ -118,6 +138,7 @@ def build_preprocessor(
         transformers.append(("numeric", numeric_pipeline, summary.numeric))
 
     if summary.low_cardinality_categorical:
+        LOGGER.info("adding low-cardinality categorical preprocessing columns=%d", len(summary.low_cardinality_categorical))
         low_card_pipeline = Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="constant", fill_value="__missing__")),
@@ -127,6 +148,7 @@ def build_preprocessor(
         transformers.append(("categorical_low", low_card_pipeline, summary.low_cardinality_categorical))
 
     if summary.high_cardinality_categorical:
+        LOGGER.info("adding high-cardinality hashing preprocessing columns=%d", len(summary.high_cardinality_categorical))
         high_card_pipeline = Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="constant", fill_value="__missing__")),
@@ -136,6 +158,7 @@ def build_preprocessor(
         transformers.append(("categorical_high", high_card_pipeline, summary.high_cardinality_categorical))
 
     if not transformers:
+        LOGGER.error("no usable feature columns were found")
         raise ValueError("no usable feature columns were found")
 
     preprocessor = ColumnTransformer(
@@ -144,14 +167,20 @@ def build_preprocessor(
         sparse_threshold=0.3,
         verbose_feature_names_out=True,
     )
+    LOGGER.info("preprocessor built transformers=%s", [name for name, _, _ in transformers])
     return preprocessor, summary
 
 
 def transform_to_float32(preprocessor: ColumnTransformer, frame: pd.DataFrame):
+    LOGGER.debug("transforming frame to float32 rows=%d columns=%d", len(frame), len(frame.columns))
     transformed = preprocessor.transform(frame)
     if sparse.issparse(transformed):
-        return transformed.astype(np.float32)
-    return np.asarray(transformed, dtype=np.float32)
+        out = transformed.astype(np.float32)
+        LOGGER.debug("transformed sparse matrix shape=%s nnz=%d dtype=%s", out.shape, out.nnz, out.dtype)
+        return out
+    out = np.asarray(transformed, dtype=np.float32)
+    LOGGER.debug("transformed dense matrix shape=%s dtype=%s", out.shape, out.dtype)
+    return out
 
 
 def _feature_names(X) -> list[str]:
