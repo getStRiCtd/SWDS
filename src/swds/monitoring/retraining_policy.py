@@ -159,12 +159,19 @@ def simulate_retraining_policies(
     for history_mode in history_modes:
         if history_mode not in {"all", "rolling"}:
             raise ValueError("history_mode must be 'all' or 'rolling'")
-        for policy_name, triggers in policy_triggers.items():
-            if len(triggers) != n_windows:
-                raise ValueError(f"trigger length mismatch for policy {policy_name!r}")
+        policy_groups = _group_policies_by_triggers(policy_triggers, n_windows=n_windows)
+        LOGGER.info(
+            "policy simulation trigger grouping history_mode=%s unique_schedules=%d policies=%d",
+            history_mode,
+            len(policy_groups),
+            len(policy_triggers),
+        )
+        for policy_names, triggers in policy_groups:
+            policy_name = policy_names[0]
             LOGGER.info(
-                "policy simulation run started policy=%s history_mode=%s trigger_count=%d",
+                "policy simulation run started policy=%s aliases=%d history_mode=%s trigger_count=%d",
                 policy_name,
+                len(policy_names) - 1,
                 history_mode,
                 int(np.asarray(triggers, dtype=bool).sum()),
             )
@@ -173,6 +180,7 @@ def simulate_retraining_policies(
             seen_X: list = []
             seen_y: list[np.ndarray] = []
             retrains = 0
+            policy_rows = []
 
             for window_index, (X_cur, y_cur) in enumerate(zip(X_windows, y_windows, strict=True)):
                 metrics = _evaluate_cached(
@@ -195,7 +203,7 @@ def simulate_retraining_policies(
                     trigger,
                     metrics,
                 )
-                rows.append(
+                policy_rows.append(
                     {
                         "policy": policy_name,
                         "history_mode": history_mode,
@@ -274,6 +282,17 @@ def simulate_retraining_policies(
                 history_mode,
                 retrains,
             )
+            rows.extend(policy_rows)
+            if len(policy_names) > 1:
+                LOGGER.info(
+                    "policy simulation reused identical schedule canonical=%s aliases=%s history_mode=%s rows_per_policy=%d",
+                    policy_name,
+                    ",".join(policy_names[1:]),
+                    history_mode,
+                    len(policy_rows),
+                )
+                for alias in policy_names[1:]:
+                    rows.extend({**row, "policy": alias} for row in policy_rows)
 
     window_table = pd.DataFrame(rows)
     LOGGER.info("policy window table ready rows=%d", len(window_table))
@@ -332,6 +351,20 @@ def simulate_retraining_policies(
         windows=window_table,
         summary=summary,
     )
+
+
+def _group_policies_by_triggers(policy_triggers: dict[str, np.ndarray], *, n_windows: int) -> list[tuple[list[str], np.ndarray]]:
+    grouped: dict[bytes, tuple[list[str], np.ndarray]] = {}
+    for policy_name, triggers in policy_triggers.items():
+        trigger_array = np.asarray(triggers, dtype=bool)
+        if len(trigger_array) != n_windows:
+            raise ValueError(f"trigger length mismatch for policy {policy_name!r}")
+        key = trigger_array.tobytes()
+        if key not in grouped:
+            grouped[key] = ([policy_name], trigger_array)
+        else:
+            grouped[key][0].append(policy_name)
+    return list(grouped.values())
 
 
 def _evaluate_cached(

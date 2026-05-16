@@ -304,11 +304,31 @@ def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--n-jobs", type=int, default=None, help="parallel jobs for drift scoring; -1 uses all cores")
     parser.add_argument("--swds-backend", choices=["auto", "numpy", "torch"], default=None)
     parser.add_argument("--swds-device", default=None, help="torch device for SWDS, for example cuda or cuda:0")
+    parser.add_argument("--ks-max-features", type=int, default=None, help="maximum features sampled for KS baselines")
+    parser.add_argument("--psi-max-features", type=int, default=None, help="maximum features sampled for PSI baselines")
+    parser.add_argument("--psi-n-bins", type=int, default=None, help="number of PSI bins")
+    parser.add_argument("--mmd-max-samples", type=int, default=None, help="maximum rows per side for MMD")
+    parser.add_argument("--energy-max-samples", type=int, default=None, help="maximum rows per side for energy distance")
+    parser.add_argument("--c2st-max-samples", type=int, default=None, help="maximum total rows for C2ST")
+    parser.add_argument("--c2st-n-splits", type=int, default=None, help="cross-validation splits for C2ST")
+    parser.add_argument("--c2st-n-jobs", type=int, default=None, help="parallel jobs inside C2ST cross-validation")
 
 
 def _runtime_overrides(args: argparse.Namespace) -> dict[str, object]:
     values = {}
-    for attr in ("n_jobs", "swds_backend", "swds_device"):
+    for attr in (
+        "n_jobs",
+        "swds_backend",
+        "swds_device",
+        "ks_max_features",
+        "psi_max_features",
+        "psi_n_bins",
+        "mmd_max_samples",
+        "energy_max_samples",
+        "c2st_max_samples",
+        "c2st_n_splits",
+        "c2st_n_jobs",
+    ):
         value = getattr(args, attr, None)
         if value is not None:
             values[attr] = value

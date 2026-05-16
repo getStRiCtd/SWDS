@@ -51,6 +51,32 @@ class SlicedWassersteinTests(unittest.TestCase):
         prepared = scorer.compute(ref, cur)[0].score
         self.assertAlmostEqual(direct, prepared, places=10)
 
+    def test_prepared_reference_matches_direct_baselines(self):
+        rng = np.random.default_rng(12)
+        ref = rng.normal(size=(140, 4))
+        cur = rng.normal(loc=0.2, size=(90, 4))
+        ref = np.column_stack([ref, rng.integers(0, 2, size=len(ref))])
+        cur = np.column_stack([cur, rng.integers(0, 2, size=len(cur))])
+        methods = ("mean_ks", "max_ks", "mean_psi", "max_psi", "mmd_rbf", "energy")
+        config = DriftRuntimeConfig(seed=6, mmd_max_samples=80, energy_max_samples=80)
+
+        direct = compute_drift_scores(
+            ref,
+            cur,
+            methods=methods,
+            seed=config.seed,
+            mmd_max_samples=config.mmd_max_samples,
+            energy_max_samples=config.energy_max_samples,
+        )
+        scorer = DriftScorer(methods=methods, config=config)
+        scorer.prepare_reference(ref)
+        prepared = scorer.compute(ref, cur)
+
+        self.assertEqual([score.method for score in prepared], list(methods))
+        for direct_score, prepared_score in zip(direct, prepared, strict=True):
+            self.assertEqual(direct_score.method, prepared_score.method)
+            self.assertAlmostEqual(direct_score.score, prepared_score.score, places=10)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,6 +105,17 @@ def synthetic_drift_config_from_mapping(config: dict[str, Any]) -> SyntheticDrif
         "max_onehot_cardinality",
         "hash_features",
         "threshold_quantile",
+        "n_jobs",
+        "swds_backend",
+        "swds_device",
+        "ks_max_features",
+        "psi_max_features",
+        "psi_n_bins",
+        "mmd_max_samples",
+        "energy_max_samples",
+        "c2st_max_samples",
+        "c2st_n_splits",
+        "c2st_n_jobs",
     ):
         if key in experiment and key not in drift:
             drift[key] = experiment[key]

@@ -7,12 +7,14 @@ from time import perf_counter
 from typing import Callable
 
 from joblib import Parallel, delayed
+import numpy as np
 
-from swds.drift.c2st import classifier_two_sample_score
-from swds.drift.energy import energy_distance_score
-from swds.drift.ks import max_ks_score, mean_ks_score
+from swds.drift.c2st import classifier_two_sample_score, classifier_two_sample_score_prepared, prepare_c2st_reference
+from swds.drift.energy import energy_distance_score, energy_distance_score_prepared, prepare_energy_reference
+from swds.drift.ks import ks_statistics, ks_statistics_prepared, max_ks_score, mean_ks_score, prepare_ks_reference
 from swds.drift.mmd import mmd_rbf_score
-from swds.drift.psi import max_psi_score, mean_psi_score
+from swds.drift.mmd import mmd_rbf_score_prepared, prepare_mmd_reference
+from swds.drift.psi import max_psi_score, mean_psi_score, prepare_psi_reference, psi_statistics, psi_statistics_prepared
 from swds.drift.sinkhorn import sinkhorn_divergence_score
 from swds.drift.sliced_wasserstein import (
     prepare_sliced_wasserstein_reference,
@@ -23,6 +25,8 @@ from swds.drift.sliced_wasserstein import (
 
 
 LOGGER = logging.getLogger(__name__)
+_KS_METHODS = frozenset({"mean_ks", "max_ks"})
+_PSI_METHODS = frozenset({"mean_psi", "max_psi"})
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,9 @@ class DriftRuntimeConfig:
     n_jobs: int = 1
     swds_backend: str = "auto"
     swds_device: str | None = None
+    ks_max_features: int | None = 2048
+    psi_max_features: int | None = 2048
+    psi_n_bins: int = 10
     mmd_max_samples: int = 1000
     energy_max_samples: int = 1000
     c2st_max_samples: int = 4000
@@ -64,6 +71,9 @@ def drift_method_registry(
     seed: int = 42,
     swds_backend: str = "auto",
     swds_device: str | None = None,
+    ks_max_features: int | None = 2048,
+    psi_max_features: int | None = 2048,
+    psi_n_bins: int = 10,
     mmd_max_samples: int = 1000,
     energy_max_samples: int = 1000,
     c2st_max_samples: int = 4000,
@@ -72,10 +82,10 @@ def drift_method_registry(
 ) -> dict[str, Callable]:
     return {
         "swds": lambda a, b: sliced_wasserstein_score(a, b, seed=seed, backend=swds_backend, device=swds_device),
-        "mean_ks": lambda a, b: mean_ks_score(a, b, seed=seed),
-        "max_ks": lambda a, b: max_ks_score(a, b, seed=seed),
-        "mean_psi": lambda a, b: mean_psi_score(a, b, seed=seed),
-        "max_psi": lambda a, b: max_psi_score(a, b, seed=seed),
+        "mean_ks": lambda a, b: mean_ks_score(a, b, max_features=ks_max_features, seed=seed),
+        "max_ks": lambda a, b: max_ks_score(a, b, max_features=ks_max_features, seed=seed),
+        "mean_psi": lambda a, b: mean_psi_score(a, b, n_bins=psi_n_bins, max_features=psi_max_features, seed=seed),
+        "max_psi": lambda a, b: max_psi_score(a, b, n_bins=psi_n_bins, max_features=psi_max_features, seed=seed),
         "mmd_rbf": lambda a, b: mmd_rbf_score(a, b, seed=seed, max_samples=mmd_max_samples),
         "energy": lambda a, b: energy_distance_score(a, b, seed=seed, max_samples=energy_max_samples),
         "c2st": lambda a, b: classifier_two_sample_score(
@@ -99,6 +109,9 @@ def compute_drift_scores(
     n_jobs: int = 1,
     swds_backend: str = "auto",
     swds_device: str | None = None,
+    ks_max_features: int | None = 2048,
+    psi_max_features: int | None = 2048,
+    psi_n_bins: int = 10,
     mmd_max_samples: int = 1000,
     energy_max_samples: int = 1000,
     c2st_max_samples: int = 4000,
@@ -110,6 +123,9 @@ def compute_drift_scores(
         n_jobs=n_jobs,
         swds_backend=swds_backend,
         swds_device=swds_device,
+        ks_max_features=ks_max_features,
+        psi_max_features=psi_max_features,
+        psi_n_bins=psi_n_bins,
         mmd_max_samples=mmd_max_samples,
         energy_max_samples=energy_max_samples,
         c2st_max_samples=c2st_max_samples,
@@ -132,6 +148,9 @@ class DriftScorer:
             seed=self.config.seed,
             swds_backend=self.config.swds_backend,
             swds_device=self.config.swds_device,
+            ks_max_features=self.config.ks_max_features,
+            psi_max_features=self.config.psi_max_features,
+            psi_n_bins=self.config.psi_n_bins,
             mmd_max_samples=self.config.mmd_max_samples,
             energy_max_samples=self.config.energy_max_samples,
             c2st_max_samples=self.config.c2st_max_samples,
@@ -139,11 +158,83 @@ class DriftScorer:
             c2st_n_jobs=self.config.c2st_n_jobs,
         )
         self._prepared_swds: dict[str, object] = {}
+        self._prepared_ks = None
+        self._prepared_psi = None
+        self._prepared_mmd = None
+        self._prepared_energy = None
+        self._prepared_c2st = None
         self._prepared_ref_id: int | None = None
 
     def prepare_reference(self, X_ref) -> None:
-        self._prepared_swds = {}
+        self._clear_prepared()
         self._prepared_ref_id = id(X_ref)
+        if any(method in _KS_METHODS for method in self.methods):
+            started = perf_counter()
+            self._prepared_ks = prepare_ks_reference(
+                X_ref,
+                max_features=self.config.ks_max_features,
+                seed=self.config.seed,
+            )
+            LOGGER.info(
+                "prepared drift reference family=ks rows=%d features=%d runtime=%.3fs",
+                X_ref.shape[0],
+                len(self._prepared_ks.feature_ids),
+                perf_counter() - started,
+            )
+        if any(method in _PSI_METHODS for method in self.methods):
+            started = perf_counter()
+            self._prepared_psi = prepare_psi_reference(
+                X_ref,
+                n_bins=self.config.psi_n_bins,
+                max_features=self.config.psi_max_features,
+                seed=self.config.seed,
+            )
+            LOGGER.info(
+                "prepared drift reference family=psi rows=%d features=%d bins=%d runtime=%.3fs",
+                X_ref.shape[0],
+                len(self._prepared_psi.features),
+                self.config.psi_n_bins,
+                perf_counter() - started,
+            )
+        if "mmd_rbf" in self.methods:
+            started = perf_counter()
+            self._prepared_mmd = prepare_mmd_reference(
+                X_ref,
+                max_samples=self.config.mmd_max_samples,
+                seed=self.config.seed,
+            )
+            LOGGER.info(
+                "prepared drift reference method=mmd_rbf rows=%d sampled_rows=%d runtime=%.3fs",
+                X_ref.shape[0],
+                self._prepared_mmd.x_ref.shape[0],
+                perf_counter() - started,
+            )
+        if "energy" in self.methods:
+            started = perf_counter()
+            self._prepared_energy = prepare_energy_reference(
+                X_ref,
+                max_samples=self.config.energy_max_samples,
+                seed=self.config.seed,
+            )
+            LOGGER.info(
+                "prepared drift reference method=energy rows=%d sampled_rows=%d runtime=%.3fs",
+                X_ref.shape[0],
+                self._prepared_energy.x_ref.shape[0],
+                perf_counter() - started,
+            )
+        if "c2st" in self.methods:
+            started = perf_counter()
+            self._prepared_c2st = prepare_c2st_reference(
+                X_ref,
+                max_samples=self.config.c2st_max_samples,
+                seed=self.config.seed,
+            )
+            LOGGER.info(
+                "prepared drift reference method=c2st rows=%d sampled_rows=%d runtime=%.3fs",
+                X_ref.shape[0],
+                self._prepared_c2st.X_ref_sub.shape[0],
+                perf_counter() - started,
+            )
         for method in self.methods:
             params = parse_swds_method(method)
             if params is None:
@@ -168,8 +259,7 @@ class DriftScorer:
     def compute(self, X_ref, X_cur) -> list[DriftScore]:
         if self._prepared_ref_id is not None and self._prepared_ref_id != id(X_ref):
             LOGGER.debug("prepared reference invalidated because X_ref object changed")
-            self._prepared_swds = {}
-            self._prepared_ref_id = None
+            self._clear_prepared()
         LOGGER.debug(
             "computing drift scores methods=%s seed=%d ref_shape=%s cur_shape=%s n_jobs=%d",
             self.methods,
@@ -178,12 +268,95 @@ class DriftScorer:
             tuple(getattr(X_cur, "shape", ())),
             self.config.n_jobs,
         )
-        if self.config.n_jobs == 1 or len(self.methods) <= 1:
-            return [self._compute_one(method, X_ref, X_cur) for method in self.methods]
-        scores = Parallel(n_jobs=self.config.n_jobs, prefer="threads")(
-            delayed(self._compute_one)(method, X_ref, X_cur) for method in self.methods
-        )
-        return list(scores)
+        tasks = self._compute_tasks(X_ref, X_cur)
+        if self.config.n_jobs == 1 or len(tasks) <= 1:
+            chunks = [compute() for _, compute in tasks]
+        else:
+            chunks = Parallel(n_jobs=self.config.n_jobs, prefer="threads")(
+                delayed(compute)() for _, compute in tasks
+            )
+        by_method: dict[str, DriftScore] = {}
+        for chunk in chunks:
+            for score in chunk:
+                by_method[score.method] = score
+        return [by_method[method] for method in self.methods]
+
+    def _clear_prepared(self) -> None:
+        self._prepared_swds = {}
+        self._prepared_ks = None
+        self._prepared_psi = None
+        self._prepared_mmd = None
+        self._prepared_energy = None
+        self._prepared_c2st = None
+        self._prepared_ref_id = None
+
+    def _compute_tasks(self, X_ref, X_cur) -> list[tuple[tuple[str, ...], Callable[[], list[DriftScore]]]]:
+        tasks: list[tuple[tuple[str, ...], Callable[[], list[DriftScore]]]] = []
+        consumed: set[str] = set()
+        ks_methods = tuple(dict.fromkeys(method for method in self.methods if method in _KS_METHODS))
+        if ks_methods:
+            tasks.append((ks_methods, lambda methods=ks_methods: self._compute_ks_group(methods, X_ref, X_cur)))
+            consumed.update(_KS_METHODS)
+        psi_methods = tuple(dict.fromkeys(method for method in self.methods if method in _PSI_METHODS))
+        if psi_methods:
+            tasks.append((psi_methods, lambda methods=psi_methods: self._compute_psi_group(methods, X_ref, X_cur)))
+            consumed.update(_PSI_METHODS)
+
+        seen = set(consumed)
+        for method in self.methods:
+            if method in seen:
+                continue
+            seen.add(method)
+            tasks.append(((method,), lambda method=method: [self._compute_one(method, X_ref, X_cur)]))
+        return tasks
+
+    def _compute_ks_group(self, methods: tuple[str, ...], X_ref, X_cur) -> list[DriftScore]:
+        LOGGER.debug("drift method group started family=ks methods=%s", methods)
+        started = perf_counter()
+        if self._prepared_ks is not None:
+            stats = ks_statistics_prepared(self._prepared_ks, X_cur)
+        else:
+            stats = ks_statistics(X_ref, X_cur, max_features=self.config.ks_max_features, seed=self.config.seed)
+        elapsed = perf_counter() - started
+        return self._scores_from_statistics(methods, stats, elapsed)
+
+    def _compute_psi_group(self, methods: tuple[str, ...], X_ref, X_cur) -> list[DriftScore]:
+        LOGGER.debug("drift method group started family=psi methods=%s", methods)
+        started = perf_counter()
+        if self._prepared_psi is not None:
+            stats = psi_statistics_prepared(self._prepared_psi, X_cur)
+        else:
+            stats = psi_statistics(
+                X_ref,
+                X_cur,
+                n_bins=self.config.psi_n_bins,
+                max_features=self.config.psi_max_features,
+                seed=self.config.seed,
+            )
+        elapsed = perf_counter() - started
+        return self._scores_from_statistics(methods, stats, elapsed)
+
+    def _scores_from_statistics(self, methods: tuple[str, ...], stats, elapsed: float) -> list[DriftScore]:
+        runtime = elapsed / max(len(methods), 1)
+        scores = []
+        for method in methods:
+            if len(stats) == 0:
+                value = float("nan")
+            elif method.startswith("mean_"):
+                value = float(np.nanmean(stats))
+            elif method.startswith("max_"):
+                value = float(np.nanmax(stats))
+            else:
+                raise ValueError(f"unknown grouped drift method: {method!r}")
+            LOGGER.debug(
+                "drift grouped method completed method=%s score=%.8f runtime_share=%.4fs group_runtime=%.4fs",
+                method,
+                value,
+                runtime,
+                elapsed,
+            )
+            scores.append(DriftScore(method=method, score=value, runtime_seconds=runtime))
+        return scores
 
     def _compute_one(self, method: str, X_ref, X_cur) -> DriftScore:
         scorer = self._registry.get(method) or _dynamic_method(
@@ -199,6 +372,35 @@ class DriftScorer:
         started = perf_counter()
         if method in self._prepared_swds:
             score = float(score_sliced_wasserstein_prepared(self._prepared_swds[method], X_cur))
+        elif method == "mmd_rbf" and self._prepared_mmd is not None:
+            score = float(
+                mmd_rbf_score_prepared(
+                    self._prepared_mmd,
+                    X_cur,
+                    max_samples=self.config.mmd_max_samples,
+                    seed=self.config.seed,
+                )
+            )
+        elif method == "energy" and self._prepared_energy is not None:
+            score = float(
+                energy_distance_score_prepared(
+                    self._prepared_energy,
+                    X_cur,
+                    max_samples=self.config.energy_max_samples,
+                    seed=self.config.seed,
+                )
+            )
+        elif method == "c2st" and self._prepared_c2st is not None:
+            score = float(
+                classifier_two_sample_score_prepared(
+                    self._prepared_c2st,
+                    X_cur,
+                    max_samples=self.config.c2st_max_samples,
+                    seed=self.config.seed,
+                    n_splits=self.config.c2st_n_splits,
+                    n_jobs=self.config.c2st_n_jobs,
+                )
+            )
         else:
             score = float(scorer(X_ref, X_cur))
         elapsed = perf_counter() - started

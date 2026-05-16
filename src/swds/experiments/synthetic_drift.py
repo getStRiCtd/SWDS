@@ -47,6 +47,9 @@ class SyntheticDriftExperimentConfig:
     n_jobs: int = 1
     swds_backend: str = "auto"
     swds_device: str | None = None
+    ks_max_features: int | None = 2048
+    psi_max_features: int | None = 2048
+    psi_n_bins: int = 10
     mmd_max_samples: int = 1000
     energy_max_samples: int = 1000
     c2st_max_samples: int = 4000
@@ -403,6 +406,9 @@ def _drift_runtime_config(config: SyntheticDriftExperimentConfig) -> DriftRuntim
         n_jobs=config.n_jobs,
         swds_backend=config.swds_backend,
         swds_device=config.swds_device,
+        ks_max_features=config.ks_max_features,
+        psi_max_features=config.psi_max_features,
+        psi_n_bins=config.psi_n_bins,
         mmd_max_samples=config.mmd_max_samples,
         energy_max_samples=config.energy_max_samples,
         c2st_max_samples=config.c2st_max_samples,

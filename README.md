@@ -162,6 +162,15 @@ CUDA Torch wheel before launching `uv run`, then pass
 On CPU machines `auto` avoids importing Torch unless an NVIDIA device is visible
 or `SWDS_AUTO_TORCH=1` is set.
 
+For fixed train-reference monitoring, the runner prepares shared reference
+state once per dataset for SWDS, KS, PSI, MMD, energy distance, and C2ST.
+`mean_ks`/`max_ks` and `mean_psi`/`max_psi` share the same per-feature
+statistics inside each window, and H3 retraining policies with identical
+trigger schedules share one simulated model trajectory. Runtime knobs are also
+available from the CLI, for example `--ks-max-features`, `--psi-max-features`,
+`--mmd-max-samples`, `--energy-max-samples`, `--c2st-max-samples`,
+`--c2st-n-splits`, and `--c2st-n-jobs`.
+
 ## Implemented drift methods
 
 - `swds`: quantile-grid Sliced Wasserstein distance;
