@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
@@ -58,7 +59,7 @@ def prepare_tabred(
     if clone_if_missing and not repo.exists():
         repo.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.info("cloning TabReD repository url=%s target=%s", TABRED_REPO_URL, repo)
-        subprocess.run(["git", "clone", "--depth", "1", TABRED_REPO_URL, str(repo)], check=True)
+        _run_logged_command(["git", "clone", "--depth", "1", TABRED_REPO_URL, str(repo)], label="tabred-git-clone")
         LOGGER.info("TabReD repository cloned target=%s", repo)
     if not repo.exists():
         LOGGER.error("TabReD repository missing path=%s", repo)
@@ -85,11 +86,11 @@ def prepare_tabred(
         if not source.exists():
             try:
                 LOGGER.info("running TabReD preprocessing script dataset=%s script=%s", dataset, script)
-                subprocess.run(
-                    ["python", f"preprocessing/{script}"],
+                _run_logged_command(
+                    [sys.executable, f"preprocessing/{script}"],
                     cwd=repo,
-                    check=True,
                     env=_tabred_env(repo),
+                    label=f"tabred-{dataset}",
                 )
                 LOGGER.info("TabReD preprocessing script completed dataset=%s", dataset)
             except subprocess.CalledProcessError as exc:
@@ -155,6 +156,35 @@ def validate_tabred_root(root: str | Path = "data/raw/tabred") -> list[TabReDPre
             )
         )
     return results
+
+
+def _run_logged_command(
+    command: list[str],
+    *,
+    label: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    LOGGER.info("subprocess started label=%s command=%s cwd=%s", label, command, cwd or Path.cwd())
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if process.stdout is not None:
+        for line in process.stdout:
+            text = line.rstrip()
+            if text:
+                LOGGER.info("subprocess[%s] %s", label, text)
+    return_code = process.wait()
+    if return_code:
+        LOGGER.error("subprocess failed label=%s return_code=%d", label, return_code)
+        raise subprocess.CalledProcessError(return_code, command)
+    LOGGER.info("subprocess completed label=%s return_code=%d", label, return_code)
 
 
 def _normalize_datasets(datasets: list[str] | tuple[str, ...]) -> list[str]:
