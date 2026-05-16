@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 import logging
 
@@ -152,6 +151,10 @@ def simulate_retraining_policies(
         if base_quality_drop is not None
         else np.full(n_windows, np.nan)
     )
+    initial_key = ("initial", seed)
+    model_cache = {initial_key: initial_model}
+    history_cache = {}
+    evaluation_cache: dict[tuple[tuple, int], dict[str, float]] = {}
 
     for history_mode in history_modes:
         if history_mode not in {"all", "rolling"}:
@@ -165,13 +168,22 @@ def simulate_retraining_policies(
                 history_mode,
                 int(np.asarray(triggers, dtype=bool).sum()),
             )
-            model = _copy_initial_model(initial_model)
+            model_key = initial_key
+            model = initial_model
             seen_X: list = []
             seen_y: list[np.ndarray] = []
             retrains = 0
 
             for window_index, (X_cur, y_cur) in enumerate(zip(X_windows, y_windows, strict=True)):
-                metrics = evaluate_model(model, X_cur, y_cur, task_type=task_type)
+                metrics = _evaluate_cached(
+                    model,
+                    model_key=model_key,
+                    window_index=window_index,
+                    X_cur=X_cur,
+                    y_cur=y_cur,
+                    task_type=task_type,
+                    cache=evaluation_cache,
+                )
                 quality = float(metrics.get(primary_metric, np.nan))
                 trigger = bool(triggers[window_index])
                 LOGGER.debug(
@@ -199,28 +211,56 @@ def simulate_retraining_policies(
                 seen_X.append(X_cur)
                 seen_y.append(np.asarray(y_cur))
                 if trigger:
-                    X_fit, y_fit = _training_history(
-                        X_initial=X_initial,
-                        y_initial=y_initial,
-                        seen_X=seen_X,
-                        seen_y=seen_y,
+                    retrain_seed = seed + retrains + 1
+                    history_key = _history_key(
                         history_mode=history_mode,
+                        after_window=window_index,
                         rolling_history_windows=rolling_history_windows,
                     )
-                    LOGGER.info(
-                        "policy retraining started policy=%s history=%s after_window=%d fit_rows=%d",
-                        policy_name,
-                        history_mode,
-                        window_index,
-                        len(y_fit),
-                    )
-                    model = train_model(
-                        X_fit,
-                        y_fit,
-                        task_type=task_type,
-                        model_name=model_name,
-                        seed=seed + retrains + 1,
-                    )
+                    model_key = ("retrain", history_key, retrain_seed)
+                    if model_key in model_cache:
+                        model = model_cache[model_key]
+                        LOGGER.info(
+                            "policy retraining reused cached model policy=%s history=%s after_window=%d seed=%d",
+                            policy_name,
+                            history_mode,
+                            window_index,
+                            retrain_seed,
+                        )
+                    else:
+                        X_fit, y_fit = _cached_training_history(
+                            history_key=history_key,
+                            history_cache=history_cache,
+                            X_initial=X_initial,
+                            y_initial=y_initial,
+                            seen_X=seen_X,
+                            seen_y=seen_y,
+                            history_mode=history_mode,
+                            rolling_history_windows=rolling_history_windows,
+                        )
+                        LOGGER.info(
+                            "policy retraining started policy=%s history=%s after_window=%d fit_rows=%d seed=%d",
+                            policy_name,
+                            history_mode,
+                            window_index,
+                            len(y_fit),
+                            retrain_seed,
+                        )
+                        model = train_model(
+                            X_fit,
+                            y_fit,
+                            task_type=task_type,
+                            model_name=model_name,
+                            seed=retrain_seed,
+                        )
+                        model_cache[model_key] = model
+                        LOGGER.info(
+                            "policy retraining cached model history=%s after_window=%d seed=%d cache_size=%d",
+                            history_mode,
+                            window_index,
+                            retrain_seed,
+                            len(model_cache),
+                        )
                     retrains += 1
                     LOGGER.info(
                         "policy retraining completed policy=%s history=%s n_retrains=%d",
@@ -294,12 +334,58 @@ def simulate_retraining_policies(
     )
 
 
-def _copy_initial_model(model):
-    try:
-        return copy.deepcopy(model)
-    except Exception:
-        LOGGER.warning("failed to deepcopy initial model; reusing model object")
-        return model
+def _evaluate_cached(
+    model,
+    *,
+    model_key: tuple,
+    window_index: int,
+    X_cur,
+    y_cur,
+    task_type,
+    cache: dict[tuple[tuple, int], dict[str, float]],
+) -> dict[str, float]:
+    key = (model_key, window_index)
+    cached = cache.get(key)
+    if cached is not None:
+        LOGGER.debug("policy evaluation cache hit model_key=%s window=%d", model_key, window_index)
+        return dict(cached)
+    metrics = evaluate_model(model, X_cur, y_cur, task_type=task_type)
+    cache[key] = dict(metrics)
+    return metrics
+
+
+def _history_key(*, history_mode: str, after_window: int, rolling_history_windows: int) -> tuple:
+    if history_mode == "all":
+        return ("all", 0, after_window)
+    start = max(0, after_window - rolling_history_windows + 1)
+    return ("rolling", start, after_window)
+
+
+def _cached_training_history(
+    *,
+    history_key: tuple,
+    history_cache: dict[tuple, tuple[object, np.ndarray]],
+    X_initial,
+    y_initial,
+    seen_X: list,
+    seen_y: list[np.ndarray],
+    history_mode: str,
+    rolling_history_windows: int,
+):
+    cached = history_cache.get(history_key)
+    if cached is not None:
+        LOGGER.debug("training history cache hit key=%s rows=%d", history_key, len(cached[1]))
+        return cached
+    history = _training_history(
+        X_initial=X_initial,
+        y_initial=y_initial,
+        seen_X=seen_X,
+        seen_y=seen_y,
+        history_mode=history_mode,
+        rolling_history_windows=rolling_history_windows,
+    )
+    history_cache[history_key] = history
+    return history
 
 
 def _training_history(

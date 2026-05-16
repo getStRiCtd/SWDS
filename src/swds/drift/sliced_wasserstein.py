@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -11,6 +13,8 @@ from swds.drift.utils import n_rows, project, take_rows
 
 
 LOGGER = logging.getLogger(__name__)
+
+_AUTO_TORCH_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -112,7 +116,7 @@ def prepare_sliced_wasserstein_reference(
         )
     qs = np.linspace(0.0, 1.0, num=n_quantiles)
     z_ref = project(X_ref, directions)
-    q_ref = np.quantile(z_ref, qs, axis=0)
+    q_ref = _quantiles_from_sorted(np.sort(z_ref, axis=0), _quantile_index(qs, n_rows(X_ref)))
     LOGGER.info(
         "SWDS reference prepared on numpy rows=%d projections=%d quantiles=%d",
         n_rows(X_ref),
@@ -145,7 +149,10 @@ def score_sliced_wasserstein_prepared(
 
 def _score_numpy_prepared(prepared: SlicedWassersteinReference, X_cur) -> SlicedWassersteinResult:
     z_cur = project(X_cur, prepared.directions)
-    q_cur = np.quantile(z_cur, prepared.quantile_grid, axis=0)
+    q_cur = _quantiles_from_sorted(
+        np.sort(z_cur, axis=0),
+        _quantile_index(np.asarray(prepared.quantile_grid, dtype=np.float64), n_rows(X_cur)),
+    )
     q_ref = np.asarray(prepared.reference_quantiles)
     per_projection = np.mean((q_ref - q_cur) ** 2, axis=0)
     return SlicedWassersteinResult(
@@ -162,6 +169,8 @@ def _resolve_backend(backend: str, device: str | None, X) -> tuple[str, str | No
         return "numpy", None
     if backend == "auto" and sparse.issparse(X):
         return "numpy", None
+    if backend == "auto" and device is None and not _cuda_device_hint_present():
+        return "numpy", None
     try:
         import torch
     except ImportError:
@@ -176,6 +185,31 @@ def _resolve_backend(backend: str, device: str | None, X) -> tuple[str, str | No
             raise RuntimeError("SWDS torch backend requested CUDA, but torch.cuda.is_available() is false")
         return "numpy", None
     return "torch", str(resolved_device)
+
+
+def _cuda_device_hint_present() -> bool:
+    if os.environ.get("SWDS_AUTO_TORCH", "").lower() in _AUTO_TORCH_ENV_VALUES:
+        return True
+    for name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+        value = os.environ.get(name)
+        if value and value.lower() not in {"", "-1", "none", "void"}:
+            return True
+    return Path("/proc/driver/nvidia/version").exists()
+
+
+def _quantile_index(qs: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    positions = qs * max(n - 1, 0)
+    lower = np.floor(positions).astype(np.int64)
+    upper = np.ceil(positions).astype(np.int64)
+    weight = (positions - lower).astype(np.float64)
+    return lower, upper, weight
+
+
+def _quantiles_from_sorted(sorted_values: np.ndarray, quantile_index: tuple[np.ndarray, np.ndarray, np.ndarray]) -> np.ndarray:
+    lower, upper, weight = quantile_index
+    left = sorted_values[lower, :]
+    right = sorted_values[upper, :]
+    return left * (1.0 - weight[:, None]) + right * weight[:, None]
 
 
 def _prepare_torch_reference(

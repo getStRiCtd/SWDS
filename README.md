@@ -159,6 +159,8 @@ remain CPU-based; GPU acceleration applies to SWDS projection and quantile
 computation. If using Colab, make sure the environment actually contains a
 CUDA Torch wheel before launching `uv run`, then pass
 `--swds-backend torch --swds-device cuda` to fail fast if CUDA is not visible.
+On CPU machines `auto` avoids importing Torch unless an NVIDIA device is visible
+or `SWDS_AUTO_TORCH=1` is set.
 
 ## Implemented drift methods
 
