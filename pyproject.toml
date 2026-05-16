@@ -40,7 +40,7 @@ tabred = [
     "polars>=1.36.0",
     "pyarrow>=22.0.0",
 ]
-`
+
 
 [project.scripts]
 swds = "swds.cli:main"
