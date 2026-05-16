@@ -11,7 +11,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from swds.data.preprocessing import build_preprocessor, infer_feature_types, transform_to_float32
 from swds.data.schema import TabularDataset
 from swds.data.temporal_split import official_split, temporal_split
-from swds.drift.registry import DEFAULT_METHODS, compute_drift_scores
+from swds.drift.registry import DEFAULT_METHODS, DriftRuntimeConfig, DriftScorer
 from swds.monitoring.thresholds import quantile_threshold
 from swds.monitoring.windows import fixed_count_windows
 
@@ -44,6 +44,14 @@ class SyntheticDriftExperimentConfig:
     max_onehot_cardinality: int = 32
     hash_features: int = 256
     threshold_quantile: float = 0.95
+    n_jobs: int = 1
+    swds_backend: str = "auto"
+    swds_device: str | None = None
+    mmd_max_samples: int = 1000
+    energy_max_samples: int = 1000
+    c2st_max_samples: int = 4000
+    c2st_n_splits: int = 5
+    c2st_n_jobs: int | None = None
     numeric_fraction: float = 0.3
     categorical_fraction: float = 0.5
     mean_delta: float = 0.75
@@ -132,6 +140,8 @@ def run_synthetic_drift_experiment(
         config.window_size,
         config.drift_start_window,
     )
+    scorer = DriftScorer(methods=config.methods, config=_drift_runtime_config(config))
+    scorer.prepare_reference(X_ref)
     validation_scores = _score_clean_windows(
         X_ref=X_ref,
         frame=split.val,
@@ -139,8 +149,9 @@ def run_synthetic_drift_experiment(
         preprocessor=preprocessor,
         windows=val_windows,
         methods=config.methods,
-        seed=config.seed,
         dataset_name=dataset.name,
+        config=config,
+        scorer=scorer,
     )
     LOGGER.info("synthetic drift calibrating thresholds validation_rows=%d", len(validation_scores))
     thresholds = _calibrate_thresholds(validation_scores, config.threshold_quantile)
@@ -174,7 +185,7 @@ def run_synthetic_drift_experiment(
                 )
                 LOGGER.debug("synthetic drift injected scenario=%s window=%s", scenario, window.label)
             X_cur = transform_to_float32(preprocessor, raw_window[feature_cols])
-            scores = compute_drift_scores(X_ref, X_cur, methods=config.methods, seed=config.seed)
+            scores = scorer.compute(X_ref, X_cur)
             for score in scores:
                 threshold = thresholds.get(score.method, np.nan)
                 LOGGER.debug(
@@ -332,15 +343,19 @@ def _score_clean_windows(
     preprocessor,
     windows,
     methods: tuple[str, ...],
-    seed: int,
     dataset_name: str,
+    config: SyntheticDriftExperimentConfig,
+    scorer: DriftScorer | None = None,
 ) -> pd.DataFrame:
     LOGGER.info("scoring clean validation windows dataset=%s windows=%d methods=%s", dataset_name, len(windows), methods)
     rows = []
+    if scorer is None:
+        scorer = DriftScorer(methods=methods, config=_drift_runtime_config(config))
+        scorer.prepare_reference(X_ref)
     for window in windows:
         LOGGER.info("scoring clean window dataset=%s label=%s index=%d rows=%d", dataset_name, window.label, window.index, window.size)
         X_cur = transform_to_float32(preprocessor, frame.iloc[window.start : window.end][feature_cols])
-        for score in compute_drift_scores(X_ref, X_cur, methods=methods, seed=seed):
+        for score in scorer.compute(X_ref, X_cur):
             LOGGER.debug(
                 "clean validation score dataset=%s window=%s method=%s score=%.8f runtime=%.4fs",
                 dataset_name,
@@ -380,6 +395,20 @@ def _calibrate_thresholds(validation_scores: pd.DataFrame, quantile: float) -> d
         else:
             LOGGER.warning("synthetic drift threshold skipped method=%s reason=no finite scores", method)
     return thresholds
+
+
+def _drift_runtime_config(config: SyntheticDriftExperimentConfig) -> DriftRuntimeConfig:
+    return DriftRuntimeConfig(
+        seed=config.seed,
+        n_jobs=config.n_jobs,
+        swds_backend=config.swds_backend,
+        swds_device=config.swds_device,
+        mmd_max_samples=config.mmd_max_samples,
+        energy_max_samples=config.energy_max_samples,
+        c2st_max_samples=config.c2st_max_samples,
+        c2st_n_splits=config.c2st_n_splits,
+        c2st_n_jobs=config.c2st_n_jobs,
+    )
 
 
 def _fit_drift_stats(

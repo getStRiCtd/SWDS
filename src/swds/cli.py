@@ -53,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     synthetic.add_argument("--model", default="linear", choices=MODEL_CHOICES)
     synthetic.add_argument("--seed", type=int, default=42)
     synthetic.add_argument("--methods", nargs="+", default=list(DEFAULT_METHODS))
+    _add_runtime_args(synthetic)
 
     make_syn = subparsers.add_parser("make-synthetic", help="write generated temporal data to CSV")
     make_syn.add_argument("--output", default="data/processed/synthetic_temporal.csv")
@@ -72,23 +73,29 @@ def main(argv: list[str] | None = None) -> int:
     csv.add_argument("--model", default="linear", choices=MODEL_CHOICES)
     csv.add_argument("--seed", type=int, default=42)
     csv.add_argument("--methods", nargs="+", default=list(DEFAULT_METHODS))
+    _add_runtime_args(csv)
 
     run_config = subparsers.add_parser("run-config", help="run an experiment from a YAML config")
     run_config.add_argument("--config", required=True)
     run_config.add_argument("--output", default=None, help="override output_dir from config")
+    _add_runtime_args(run_config)
 
     run_drift = subparsers.add_parser("run-synthetic-drift", help="run controlled drift injection from YAML config")
     run_drift.add_argument("--config", required=True)
     run_drift.add_argument("--output", default=None, help="override synthetic drift output directory")
+    _add_runtime_args(run_drift)
 
     run_ablation = subparsers.add_parser("run-ablation", help="run configured ablations from a YAML config")
     run_ablation.add_argument("--config", required=True)
     run_ablation.add_argument("--output", default=None, help="override ablation output directory")
+    _add_runtime_args(run_ablation)
 
     run_batch = subparsers.add_parser("run-batch", help="run many YAML configs and record exclusions")
     run_batch.add_argument("--configs", nargs="+", required=True)
     run_batch.add_argument("--output", default="results/batch")
     run_batch.add_argument("--fail-fast", action="store_true", help="stop after the first failed config")
+    run_batch.add_argument("--rerun-completed", action="store_true", help="recompute configs whose result files already exist")
+    _add_runtime_args(run_batch)
 
     report = subparsers.add_parser("build-report", help="build paper tables and figures from result directories")
     report.add_argument("--results", nargs="+", required=True)
@@ -136,6 +143,7 @@ def _run_command(args: argparse.Namespace) -> int:
             methods=tuple(args.methods),
             seed=args.seed,
         )
+        config = _with_runtime_overrides(config, args)
         run_temporal_experiment(dataset, config=config, output_dir=args.output)
         LOGGER.info("synthetic run completed output=%s drift_start_row=%d", args.output, drift_start)
         print(f"synthetic drift starts at row {drift_start}; results written to {args.output}")
@@ -176,6 +184,7 @@ def _run_command(args: argparse.Namespace) -> int:
             methods=tuple(args.methods),
             seed=args.seed,
         )
+        config = _with_runtime_overrides(config, args)
         run_temporal_experiment(dataset, config=config, output_dir=args.output)
         LOGGER.info("CSV run completed output=%s", args.output)
         print(f"results written to {args.output}")
@@ -186,6 +195,7 @@ def _run_command(args: argparse.Namespace) -> int:
         raw_config = load_experiment_yaml(args.config)
         dataset = load_dataset_from_experiment_config(raw_config)
         config = experiment_config_from_mapping(raw_config)
+        config = _with_runtime_overrides(config, args)
         output = args.output or output_dir_from_config(raw_config)
         run_temporal_experiment(dataset, config=config, output_dir=output)
         LOGGER.info("config run completed config=%s output=%s", args.config, output)
@@ -197,6 +207,7 @@ def _run_command(args: argparse.Namespace) -> int:
         raw_config = load_experiment_yaml(args.config)
         dataset = load_dataset_from_experiment_config(raw_config)
         config = synthetic_drift_config_from_mapping(raw_config)
+        config = _with_runtime_overrides(config, args)
         output = args.output or synthetic_drift_output_dir_from_config(raw_config)
         run_synthetic_drift_experiment(dataset, config=config, output_dir=output)
         LOGGER.info("synthetic drift run completed config=%s output=%s", args.config, output)
@@ -208,6 +219,7 @@ def _run_command(args: argparse.Namespace) -> int:
         raw_config = load_experiment_yaml(args.config)
         dataset = load_dataset_from_experiment_config(raw_config)
         base_config = experiment_config_from_mapping(raw_config)
+        base_config = _with_runtime_overrides(base_config, args)
         ablation_config = ablation_config_from_mapping(raw_config)
         output = args.output or str(Path(output_dir_from_config(raw_config)).with_name("ablation"))
         run_ablation_experiment(dataset, base_config=base_config, config=ablation_config, output_dir=output)
@@ -217,7 +229,13 @@ def _run_command(args: argparse.Namespace) -> int:
 
     if args.command == "run-batch":
         LOGGER.info("batch run started configs=%d output=%s fail_fast=%s", len(args.configs), args.output, args.fail_fast)
-        run_config_batch(args.configs, output_dir=args.output, continue_on_error=not args.fail_fast)
+        run_config_batch(
+            args.configs,
+            output_dir=args.output,
+            continue_on_error=not args.fail_fast,
+            runtime_overrides=_runtime_overrides(args),
+            skip_completed=not args.rerun_completed,
+        )
         LOGGER.info("batch run completed output=%s", args.output)
         print(f"batch results written to {args.output}")
         return 0
@@ -280,6 +298,28 @@ def _add_subcommand_logging_args(parser: argparse.ArgumentParser) -> None:
         default=argparse.SUPPRESS,
         help="optional log file path; can also be set before the subcommand or with SWDS_LOG_FILE",
     )
+
+
+def _add_runtime_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--n-jobs", type=int, default=None, help="parallel jobs for drift scoring; -1 uses all cores")
+    parser.add_argument("--swds-backend", choices=["auto", "numpy", "torch"], default=None)
+    parser.add_argument("--swds-device", default=None, help="torch device for SWDS, for example cuda or cuda:0")
+
+
+def _runtime_overrides(args: argparse.Namespace) -> dict[str, object]:
+    values = {}
+    for attr in ("n_jobs", "swds_backend", "swds_device"):
+        value = getattr(args, attr, None)
+        if value is not None:
+            values[attr] = value
+    return values
+
+
+def _with_runtime_overrides(config, args: argparse.Namespace):
+    overrides = _runtime_overrides(args)
+    if not overrides:
+        return config
+    return type(config)(**{**vars(config), **overrides})
 
 
 if __name__ == "__main__":

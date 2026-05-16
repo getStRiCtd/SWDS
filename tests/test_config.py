@@ -17,6 +17,8 @@ class ConfigTests(unittest.TestCase):
             "experiment": {
                 "window_size": 50,
                 "methods": ["swds"],
+                "n_jobs": -1,
+                "swds_backend": "auto",
                 "retraining": {"periods": [2], "history_modes": ["all"]},
             },
         }
@@ -25,6 +27,8 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(len(dataset.frame), 500)
         self.assertEqual(config.methods, ("swds",))
+        self.assertEqual(config.n_jobs, -1)
+        self.assertEqual(config.swds_backend, "auto")
         self.assertEqual(config.retraining_periods, (2,))
         self.assertEqual(config.retraining_history_modes, ("all",))
 

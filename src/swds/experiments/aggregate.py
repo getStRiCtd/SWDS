@@ -27,6 +27,8 @@ def run_config_batch(
     *,
     output_dir: str | Path,
     continue_on_error: bool = True,
+    runtime_overrides: dict[str, object] | None = None,
+    skip_completed: bool = True,
 ) -> pd.DataFrame:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -36,6 +38,9 @@ def run_config_batch(
         output,
         continue_on_error,
     )
+    runtime_overrides = dict(runtime_overrides or {})
+    if runtime_overrides:
+        LOGGER.info("batch runtime overrides=%s", runtime_overrides)
     rows = []
 
     for run_index, path_str in enumerate(config_paths):
@@ -43,11 +48,29 @@ def run_config_batch(
         LOGGER.info("batch config started index=%d path=%s", run_index, path)
         try:
             raw_config = load_experiment_yaml(path)
-            dataset = load_dataset_from_experiment_config(raw_config)
-            experiment_config = experiment_config_from_mapping(raw_config)
             run_output = Path(output_dir_from_config(raw_config, default=str(output / path.stem)))
             if not run_output.is_absolute():
                 run_output = output / path.stem
+            if skip_completed and _completed_run_exists(run_output):
+                dataset_name, n_samples = _completed_dataset_metadata(run_output)
+                LOGGER.info("batch config skipped because result already exists index=%d path=%s output=%s", run_index, path, run_output)
+                rows.append(
+                    {
+                        "config_path": str(path),
+                        "config_sha256": _sha256(path),
+                        "status": "completed",
+                        "dataset": dataset_name,
+                        "output_dir": str(run_output),
+                        "n_samples": n_samples,
+                        "reason": "already completed",
+                        "traceback": "",
+                    }
+                )
+                continue
+            dataset = load_dataset_from_experiment_config(raw_config)
+            experiment_config = experiment_config_from_mapping(raw_config)
+            if runtime_overrides:
+                experiment_config = type(experiment_config)(**{**vars(experiment_config), **runtime_overrides})
             LOGGER.info(
                 "batch experiment running index=%d dataset=%s output=%s",
                 run_index,
@@ -106,6 +129,32 @@ def _write_environment_manifest(path: Path) -> None:
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     LOGGER.info("environment manifest written path=%s", path)
+
+
+def _completed_run_exists(path: Path) -> bool:
+    required = (
+        "window_scores.csv",
+        "validation_scores.csv",
+        "correlations.csv",
+        "dataset_summary.csv",
+        "config.json",
+    )
+    return all((path / name).exists() for name in required)
+
+
+def _completed_dataset_metadata(path: Path) -> tuple[str, int | str]:
+    summary_path = path / "dataset_summary.csv"
+    if not summary_path.exists():
+        return "", ""
+    try:
+        summary = pd.read_csv(summary_path)
+    except Exception:
+        LOGGER.warning("failed to read completed dataset summary path=%s", summary_path)
+        return "", ""
+    if summary.empty:
+        return "", ""
+    row = summary.iloc[0]
+    return str(row.get("dataset", "")), row.get("n_samples", "")
 
 
 def _sha256(path: Path) -> str:

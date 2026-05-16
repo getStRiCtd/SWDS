@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import logging
 
@@ -137,6 +138,15 @@ def simulate_retraining_policies(
         model_name,
         primary_metric,
     )
+    LOGGER.info("training shared initial model for policy simulation rows=%d", len(y_initial))
+    initial_model = train_model(
+        X_initial,
+        y_initial,
+        task_type=task_type,
+        model_name=model_name,
+        seed=seed,
+    )
+    LOGGER.info("shared initial model ready for policy simulation")
     base_quality_drop = (
         np.asarray(base_quality_drop, dtype=float)
         if base_quality_drop is not None
@@ -155,13 +165,7 @@ def simulate_retraining_policies(
                 history_mode,
                 int(np.asarray(triggers, dtype=bool).sum()),
             )
-            model = train_model(
-                X_initial,
-                y_initial,
-                task_type=task_type,
-                model_name=model_name,
-                seed=seed,
-            )
+            model = _copy_initial_model(initial_model)
             seen_X: list = []
             seen_y: list[np.ndarray] = []
             retrains = 0
@@ -288,6 +292,14 @@ def simulate_retraining_policies(
         windows=window_table,
         summary=summary,
     )
+
+
+def _copy_initial_model(model):
+    try:
+        return copy.deepcopy(model)
+    except Exception:
+        LOGGER.warning("failed to deepcopy initial model; reusing model object")
+        return model
 
 
 def _training_history(

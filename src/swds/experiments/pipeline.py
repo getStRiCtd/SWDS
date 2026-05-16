@@ -13,7 +13,7 @@ from swds.analysis.stats import drift_quality_correlations
 from swds.data.preprocessing import build_preprocessor, transform_to_float32
 from swds.data.schema import TabularDataset, TaskType
 from swds.data.temporal_split import official_split, temporal_split
-from swds.drift.registry import DEFAULT_METHODS, compute_drift_scores
+from swds.drift.registry import DEFAULT_METHODS, DriftRuntimeConfig, DriftScorer
 from swds.drift.utils import matrix_vstack
 from swds.models.evaluate import evaluate_model, primary_metric, quality_drop
 from swds.models.train import train_model
@@ -44,6 +44,14 @@ class ExperimentConfig:
     max_onehot_cardinality: int = 32
     hash_features: int = 256
     threshold_quantile: float = 0.95
+    n_jobs: int = 1
+    swds_backend: str = "auto"
+    swds_device: str | None = None
+    mmd_max_samples: int = 1000
+    energy_max_samples: int = 1000
+    c2st_max_samples: int = 4000
+    c2st_n_splits: int = 5
+    c2st_n_jobs: int | None = None
     run_retraining: bool = True
     retraining_periods: tuple[int, ...] = (4,)
     retraining_history_modes: tuple[str, ...] = ("all", "rolling")
@@ -181,6 +189,11 @@ def run_temporal_experiment(
         len(test_windows),
         config.window_mode,
     )
+    fixed_drift_scorer = None
+    if config.reference_mode == "train":
+        fixed_drift_scorer = DriftScorer(methods=config.methods, config=_drift_runtime_config(config))
+        LOGGER.info("preparing shared fixed drift reference dataset=%s", dataset.name)
+        fixed_drift_scorer.prepare_reference(X_train_drift)
 
     validation_scores = _score_windows(
         X_ref=X_train_drift,
@@ -194,6 +207,7 @@ def run_temporal_experiment(
         metric_name=metric_name,
         reference_quality=ref_quality,
         stream_name="validation",
+        scorer=fixed_drift_scorer,
     )
     LOGGER.info(
         "calibrating thresholds dataset=%s quantile=%.4f validation_rows=%d",
@@ -221,6 +235,7 @@ def run_temporal_experiment(
         stream_name="test",
         thresholds=thresholds,
         initial_recent_reference=test_recent_reference,
+        scorer=fixed_drift_scorer,
     )
     LOGGER.info("computing drift-quality correlations dataset=%s rows=%d", dataset.name, len(window_scores))
     correlations = drift_quality_correlations(window_scores)
@@ -310,6 +325,7 @@ def _score_windows(
     stream_name: str,
     thresholds: dict[str, float] | None = None,
     initial_recent_reference: list | None = None,
+    scorer: DriftScorer | None = None,
 ) -> pd.DataFrame:
     LOGGER.info(
         "scoring windows dataset=%s stream=%s windows=%d methods=%s reference_mode=%s",
@@ -321,6 +337,11 @@ def _score_windows(
     )
     rows = []
     recent_reference = list(initial_recent_reference) if initial_recent_reference is not None else [X_ref]
+    scorer_was_provided = scorer is not None
+    scorer = scorer or DriftScorer(methods=config.methods, config=_drift_runtime_config(config))
+    if config.reference_mode == "train" and not scorer_was_provided:
+        LOGGER.info("preparing fixed drift reference dataset=%s stream=%s", dataset.name, stream_name)
+        scorer.prepare_reference(X_ref)
     for window in windows:
         X_cur = X_stream[window.start : window.end]
         X_model_cur = X_model_stream[window.start : window.end]
@@ -352,7 +373,9 @@ def _score_windows(
             drop,
             metrics,
         )
-        drift_scores = compute_drift_scores(X_ref_cur, X_cur, methods=config.methods, seed=config.seed)
+        if config.reference_mode != "train":
+            scorer = DriftScorer(methods=config.methods, config=_drift_runtime_config(config))
+        drift_scores = scorer.compute(X_ref_cur, X_cur)
         for drift_score in drift_scores:
             threshold = None if thresholds is None else thresholds.get(drift_score.method)
             LOGGER.debug(
@@ -464,6 +487,20 @@ def _run_retraining_simulation(
     simulation.summary.insert(0, "dataset", dataset.name)
     simulation.summary.insert(1, "model", config.model_name)
     return simulation
+
+
+def _drift_runtime_config(config: ExperimentConfig) -> DriftRuntimeConfig:
+    return DriftRuntimeConfig(
+        seed=config.seed,
+        n_jobs=config.n_jobs,
+        swds_backend=config.swds_backend,
+        swds_device=config.swds_device,
+        mmd_max_samples=config.mmd_max_samples,
+        energy_max_samples=config.energy_max_samples,
+        c2st_max_samples=config.c2st_max_samples,
+        c2st_n_splits=config.c2st_n_splits,
+        c2st_n_jobs=config.c2st_n_jobs,
+    )
 
 
 def _calibrate_thresholds(validation_scores: pd.DataFrame, quantile: float) -> dict[str, float]:

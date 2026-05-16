@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from swds.drift.registry import compute_drift_scores
+from swds.drift.registry import DriftRuntimeConfig, DriftScorer, compute_drift_scores
 from swds.drift.sliced_wasserstein import sliced_wasserstein_score
 
 
@@ -40,6 +40,16 @@ class SlicedWassersteinTests(unittest.TestCase):
         scores = compute_drift_scores(ref, cur, methods=("swds_k8", "swds_k16_q64"), seed=4)
         self.assertEqual([score.method for score in scores], ["swds_k8", "swds_k16_q64"])
         self.assertTrue(all(np.isfinite(score.score) for score in scores))
+
+    def test_prepared_reference_matches_direct_swds(self):
+        rng = np.random.default_rng(11)
+        ref = rng.normal(size=(120, 5))
+        cur = rng.normal(size=(80, 5))
+        direct = compute_drift_scores(ref, cur, methods=("swds_k8_q64",), seed=5)[0].score
+        scorer = DriftScorer(methods=("swds_k8_q64",), config=DriftRuntimeConfig(seed=5, swds_backend="numpy"))
+        scorer.prepare_reference(ref)
+        prepared = scorer.compute(ref, cur)[0].score
+        self.assertAlmostEqual(direct, prepared, places=10)
 
 
 if __name__ == "__main__":

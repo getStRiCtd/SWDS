@@ -14,6 +14,7 @@ def classifier_two_sample_score(
     max_samples: int = 4000,
     seed: int = 42,
     n_splits: int = 5,
+    n_jobs: int | None = None,
 ) -> float:
     X_ref_sub, _ = subsample_rows(X_ref, max_samples // 2, seed=seed)
     X_cur_sub, _ = subsample_rows(X_cur, max_samples // 2, seed=seed + 1)
@@ -33,5 +34,5 @@ def classifier_two_sample_score(
         random_state=seed,
     )
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
-    scores = cross_val_score(clf, x, y, cv=cv, scoring="roc_auc")
+    scores = cross_val_score(clf, x, y, cv=cv, scoring="roc_auc", n_jobs=n_jobs)
     return float(np.mean(scores))

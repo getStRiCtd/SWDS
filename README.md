@@ -124,7 +124,8 @@ Outputs include `ablation_correlations.csv`, `ablation_runtimes.csv`,
 ```bash
 uv run swds run-batch \
   --configs configs/datasets/tabred/*.yaml configs/datasets/external/*.yaml \
-  --output results/batch
+  --output results/batch \
+  --log-level INFO --log-file results/batch/run.log
 
 uv run swds build-report \
   --results results/batch/* results/synthetic_drift results/ablation \
@@ -134,6 +135,30 @@ uv run swds build-report \
 The batch runner writes `run_manifest.csv`, `dataset_exclusions.csv`, and
 `environment_manifest.json`. The report builder assembles paper-facing CSV
 tables and figures from saved experiment directories.
+
+Batch runs are resumable by default: configs whose `window_scores.csv`,
+`validation_scores.csv`, `correlations.csv`, `dataset_summary.csv`, and
+`config.json` already exist are recorded as completed and skipped. Add
+`--rerun-completed` to force recomputation.
+
+The dataset YAMLs keep the full method set and H3 retraining protocol, but set
+`n_jobs: -1` so drift scoring uses all CPU cores. You can override at runtime:
+
+```bash
+uv run swds run-batch \
+  --configs configs/datasets/tabred/*.yaml configs/datasets/external/*.yaml \
+  --output results/batch \
+  --n-jobs -1 \
+  --swds-backend auto
+```
+
+`swds_backend: auto` uses a CUDA-enabled Torch installation for SWDS when
+`torch.cuda.is_available()` is true and falls back to NumPy otherwise. The
+sklearn downstream models and baselines such as KS, PSI, MMD, energy, and C2ST
+remain CPU-based; GPU acceleration applies to SWDS projection and quantile
+computation. If using Colab, make sure the environment actually contains a
+CUDA Torch wheel before launching `uv run`, then pass
+`--swds-backend torch --swds-device cuda` to fail fast if CUDA is not visible.
 
 ## Implemented drift methods
 

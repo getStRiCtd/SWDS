@@ -11,6 +11,9 @@ dataset:
 synthetic_drift:
   window_size: 300
   drift_start_window: 8
+  n_jobs: -1
+  swds_backend: auto
+  c2st_n_jobs: 1
   scenarios:
     - mean_shift
     - variance_shift
