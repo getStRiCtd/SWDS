@@ -8,6 +8,7 @@ from swds.experiments.config import (
     load_experiment_yaml,
     synthetic_drift_config_from_mapping,
 )
+from swds.experiments.aggregate import _model_names_from_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -48,6 +49,11 @@ class ConfigTests(unittest.TestCase):
             path = Path(tmp) / "config.yaml"
             path.write_text("dataset:\n  type: synthetic\n", encoding="utf-8")
             self.assertEqual(load_experiment_yaml(path)["dataset"]["type"], "synthetic")
+
+    def test_batch_model_names_from_config(self):
+        raw = {"experiment": {"model_name": "linear", "model_names": ["linear", "hist_gbdt"]}}
+        self.assertEqual(_model_names_from_config(raw, default="linear"), ("linear", "hist_gbdt"))
+        self.assertEqual(_model_names_from_config({"experiment": {"model_name": "linear"}}, default="linear"), ("linear",))
 
 
 if __name__ == "__main__":

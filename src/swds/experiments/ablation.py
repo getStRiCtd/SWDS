@@ -68,7 +68,7 @@ def run_ablation_experiment(
                 (
                     "window_size",
                     str(window_size),
-                    replace(base_config, window_size=window_size, run_retraining=False),
+                    replace(base_config, window_size=window_size, enforce_min_test_windows=False, run_retraining=False),
                 )
             )
 

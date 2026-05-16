@@ -67,6 +67,12 @@ def build_report_from_results(result_dirs: list[str], *, output_dir: str | Path)
             _retraining_summary(loaded["retraining_policy_summary"]),
             tables / "table_5_retraining_policy.csv",
         )
+    if "psi_diagnostics" in loaded:
+        LOGGER.info("writing PSI diagnostics table rows=%d", len(loaded["psi_diagnostics"]))
+        written["psi_diagnostics"] = _write(
+            _psi_diagnostics_summary(loaded["psi_diagnostics"]),
+            tables / "table_5b_psi_diagnostics.csv",
+        )
     if "ablation_correlations" in loaded:
         LOGGER.info("writing ablation table rows=%d", len(loaded["ablation_correlations"]))
         written["ablation"] = _write(
@@ -99,6 +105,7 @@ def _load_result_tables(result_dirs: list[Path]) -> dict[str, pd.DataFrame]:
         "validation_scores": "validation_scores.csv",
         "correlations": "correlations.csv",
         "dataset_summary": "dataset_summary.csv",
+        "psi_diagnostics": "psi_diagnostics.csv",
         "retraining_policy_summary": "retraining_policy_summary.csv",
         "synthetic_drift_summary": "synthetic_drift_summary.csv",
         "ablation_correlations": "ablation_correlations.csv",
@@ -196,6 +203,28 @@ def _retraining_summary(summary: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
         .sort_values("median_regret")
+    )
+
+
+def _psi_diagnostics_summary(diagnostics: pd.DataFrame) -> pd.DataFrame:
+    required = {"dataset", "model", "stream", "window_index", "psi", "rank"}
+    if not required <= set(diagnostics.columns):
+        return diagnostics
+    top1 = diagnostics.loc[diagnostics["rank"] == 1].copy()
+    if top1.empty:
+        return pd.DataFrame()
+    return (
+        top1.groupby(["dataset", "model", "stream"], sort=True)
+        .agg(
+            windows=("window_index", "nunique"),
+            max_top1_psi=("psi", "max"),
+            median_top1_psi=("psi", "median"),
+            mean_zero_expected_share=("zero_expected_share", "mean"),
+            mean_zero_actual_share=("zero_actual_share", "mean"),
+            mean_clipped_expected_share=("clipped_expected_share", "mean"),
+            mean_clipped_actual_share=("clipped_actual_share", "mean"),
+        )
+        .reset_index()
     )
 
 

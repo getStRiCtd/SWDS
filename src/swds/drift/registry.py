@@ -14,7 +14,17 @@ from swds.drift.energy import energy_distance_score, energy_distance_score_prepa
 from swds.drift.ks import ks_statistics, ks_statistics_prepared, max_ks_score, mean_ks_score, prepare_ks_reference
 from swds.drift.mmd import mmd_rbf_score
 from swds.drift.mmd import mmd_rbf_score_prepared, prepare_mmd_reference
-from swds.drift.psi import max_psi_score, mean_psi_score, prepare_psi_reference, psi_statistics, psi_statistics_prepared
+from swds.drift.psi import (
+    PSIDiagnostics,
+    max_psi_score,
+    mean_psi_score,
+    p95_psi_score,
+    prepare_psi_reference,
+    psi_statistics,
+    psi_statistics_with_diagnostics_prepared,
+    topk_psi_from_stats,
+    topk_psi_score,
+)
 from swds.drift.sinkhorn import sinkhorn_divergence_score
 from swds.drift.sliced_wasserstein import (
     prepare_sliced_wasserstein_reference,
@@ -26,7 +36,7 @@ from swds.drift.sliced_wasserstein import (
 
 LOGGER = logging.getLogger(__name__)
 _KS_METHODS = frozenset({"mean_ks", "max_ks"})
-_PSI_METHODS = frozenset({"mean_psi", "max_psi"})
+_STATIC_PSI_METHODS = frozenset({"mean_psi", "max_psi", "top5_psi", "p95_psi", "robust_psi"})
 
 
 @dataclass(frozen=True)
@@ -86,6 +96,9 @@ def drift_method_registry(
         "max_ks": lambda a, b: max_ks_score(a, b, max_features=ks_max_features, seed=seed),
         "mean_psi": lambda a, b: mean_psi_score(a, b, n_bins=psi_n_bins, max_features=psi_max_features, seed=seed),
         "max_psi": lambda a, b: max_psi_score(a, b, n_bins=psi_n_bins, max_features=psi_max_features, seed=seed),
+        "top5_psi": lambda a, b: topk_psi_score(a, b, top_k=5, n_bins=psi_n_bins, max_features=psi_max_features, seed=seed),
+        "p95_psi": lambda a, b: p95_psi_score(a, b, n_bins=psi_n_bins, max_features=psi_max_features, seed=seed),
+        "robust_psi": lambda a, b: topk_psi_score(a, b, top_k=5, n_bins=psi_n_bins, max_features=psi_max_features, seed=seed),
         "mmd_rbf": lambda a, b: mmd_rbf_score(a, b, seed=seed, max_samples=mmd_max_samples),
         "energy": lambda a, b: energy_distance_score(a, b, seed=seed, max_samples=energy_max_samples),
         "c2st": lambda a, b: classifier_two_sample_score(
@@ -164,6 +177,7 @@ class DriftScorer:
         self._prepared_energy = None
         self._prepared_c2st = None
         self._prepared_ref_id: int | None = None
+        self._last_psi_diagnostics: PSIDiagnostics | None = None
 
     def prepare_reference(self, X_ref) -> None:
         self._clear_prepared()
@@ -181,7 +195,7 @@ class DriftScorer:
                 len(self._prepared_ks.feature_ids),
                 perf_counter() - started,
             )
-        if any(method in _PSI_METHODS for method in self.methods):
+        if any(_is_psi_method(method) for method in self.methods):
             started = perf_counter()
             self._prepared_psi = prepare_psi_reference(
                 X_ref,
@@ -260,6 +274,7 @@ class DriftScorer:
         if self._prepared_ref_id is not None and self._prepared_ref_id != id(X_ref):
             LOGGER.debug("prepared reference invalidated because X_ref object changed")
             self._clear_prepared()
+        self._last_psi_diagnostics = None
         LOGGER.debug(
             "computing drift scores methods=%s seed=%d ref_shape=%s cur_shape=%s n_jobs=%d",
             self.methods,
@@ -281,6 +296,9 @@ class DriftScorer:
                 by_method[score.method] = score
         return [by_method[method] for method in self.methods]
 
+    def last_psi_diagnostics(self) -> PSIDiagnostics | None:
+        return self._last_psi_diagnostics
+
     def _clear_prepared(self) -> None:
         self._prepared_swds = {}
         self._prepared_ks = None
@@ -289,6 +307,7 @@ class DriftScorer:
         self._prepared_energy = None
         self._prepared_c2st = None
         self._prepared_ref_id = None
+        self._last_psi_diagnostics = None
 
     def _compute_tasks(self, X_ref, X_cur) -> list[tuple[tuple[str, ...], Callable[[], list[DriftScore]]]]:
         tasks: list[tuple[tuple[str, ...], Callable[[], list[DriftScore]]]] = []
@@ -297,10 +316,10 @@ class DriftScorer:
         if ks_methods:
             tasks.append((ks_methods, lambda methods=ks_methods: self._compute_ks_group(methods, X_ref, X_cur)))
             consumed.update(_KS_METHODS)
-        psi_methods = tuple(dict.fromkeys(method for method in self.methods if method in _PSI_METHODS))
+        psi_methods = tuple(dict.fromkeys(method for method in self.methods if _is_psi_method(method)))
         if psi_methods:
             tasks.append((psi_methods, lambda methods=psi_methods: self._compute_psi_group(methods, X_ref, X_cur)))
-            consumed.update(_PSI_METHODS)
+            consumed.update(psi_methods)
 
         seen = set(consumed)
         for method in self.methods:
@@ -324,15 +343,17 @@ class DriftScorer:
         LOGGER.debug("drift method group started family=psi methods=%s", methods)
         started = perf_counter()
         if self._prepared_psi is not None:
-            stats = psi_statistics_prepared(self._prepared_psi, X_cur)
+            result = psi_statistics_with_diagnostics_prepared(self._prepared_psi, X_cur)
         else:
-            stats = psi_statistics(
+            prepared = prepare_psi_reference(
                 X_ref,
-                X_cur,
                 n_bins=self.config.psi_n_bins,
                 max_features=self.config.psi_max_features,
                 seed=self.config.seed,
             )
+            result = psi_statistics_with_diagnostics_prepared(prepared, X_cur)
+        stats = result.values
+        self._last_psi_diagnostics = result.diagnostics
         elapsed = perf_counter() - started
         return self._scores_from_statistics(methods, stats, elapsed)
 
@@ -342,10 +363,16 @@ class DriftScorer:
         for method in methods:
             if len(stats) == 0:
                 value = float("nan")
-            elif method.startswith("mean_"):
+            elif method == "mean_ks" or method == "mean_psi":
                 value = float(np.nanmean(stats))
-            elif method.startswith("max_"):
+            elif method == "max_ks" or method == "max_psi":
                 value = float(np.nanmax(stats))
+            elif method == "p95_psi":
+                value = float(np.nanpercentile(stats, 95))
+            elif method == "robust_psi":
+                value = topk_psi_from_stats(stats, top_k=5)
+            elif (top_k := parse_topk_psi_method(method)) is not None:
+                value = topk_psi_from_stats(stats, top_k=top_k)
             else:
                 raise ValueError(f"unknown grouped drift method: {method!r}")
             LOGGER.debug(
@@ -415,6 +442,17 @@ def parse_swds_method(method: str) -> tuple[int, int] | None:
     n_projections = int(match.group("k") or 128)
     n_quantiles = int(match.group("q") or 512)
     return n_projections, n_quantiles
+
+
+def parse_topk_psi_method(method: str) -> int | None:
+    match = re.fullmatch(r"top(?P<k>\d+)_psi", method)
+    if not match:
+        return None
+    return int(match.group("k"))
+
+
+def _is_psi_method(method: str) -> bool:
+    return method in _STATIC_PSI_METHODS or parse_topk_psi_method(method) is not None
 
 
 def _dynamic_method(

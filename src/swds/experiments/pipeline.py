@@ -34,6 +34,8 @@ class ExperimentConfig:
     window_size: int = 500
     window_time_freq: str = "M"
     min_window_size: int = 2
+    min_test_windows: int = 20
+    enforce_min_test_windows: bool = False
     reference_mode: str = "train"
     recent_reference_windows: int = 4
     drift_representation: str = "raw"
@@ -68,6 +70,7 @@ class ExperimentResult:
     correlations: pd.DataFrame
     dataset_summary: pd.DataFrame
     validation_scores: pd.DataFrame
+    psi_diagnostics: pd.DataFrame
     retraining_windows: pd.DataFrame
     retraining_summary: pd.DataFrame
 
@@ -192,13 +195,25 @@ def run_temporal_experiment(
         len(test_windows),
         config.window_mode,
     )
+    if config.enforce_min_test_windows and len(test_windows) < config.min_test_windows:
+        LOGGER.error(
+            "dataset excluded because test windows below minimum dataset=%s test_windows=%d min_test_windows=%d window_size=%d",
+            dataset.name,
+            len(test_windows),
+            config.min_test_windows,
+            config.window_size,
+        )
+        raise ValueError(
+            f"dataset {dataset.name!r} has {len(test_windows)} test windows; "
+            f"minimum for main protocol is {config.min_test_windows}"
+        )
     fixed_drift_scorer = None
     if config.reference_mode == "train":
         fixed_drift_scorer = DriftScorer(methods=config.methods, config=_drift_runtime_config(config))
         LOGGER.info("preparing shared fixed drift reference dataset=%s", dataset.name)
         fixed_drift_scorer.prepare_reference(X_train_drift)
 
-    validation_scores = _score_windows(
+    validation_scores, validation_psi_diagnostics = _score_windows(
         X_ref=X_train_drift,
         X_stream=X_val_drift,
         X_model_stream=X_val,
@@ -224,7 +239,7 @@ def run_temporal_experiment(
     test_recent_reference = _initial_recent_reference(X_val_drift, val_windows, config=config)
     LOGGER.debug("initial recent reference blocks dataset=%s count=%d", dataset.name, len(test_recent_reference))
 
-    window_scores = _score_windows(
+    window_scores, test_psi_diagnostics = _score_windows(
         X_ref=X_train_drift,
         X_stream=X_test_drift,
         X_model_stream=X_test,
@@ -239,6 +254,10 @@ def run_temporal_experiment(
         thresholds=thresholds,
         initial_recent_reference=test_recent_reference,
         scorer=fixed_drift_scorer,
+    )
+    psi_diagnostics = pd.concat(
+        [validation_psi_diagnostics, test_psi_diagnostics],
+        ignore_index=True,
     )
     LOGGER.info("computing drift-quality correlations dataset=%s rows=%d", dataset.name, len(window_scores))
     correlations = drift_quality_correlations(window_scores)
@@ -287,6 +306,7 @@ def run_temporal_experiment(
         correlations=correlations,
         dataset_summary=summary,
         validation_scores=validation_scores,
+        psi_diagnostics=psi_diagnostics,
         retraining_windows=retraining_windows,
         retraining_summary=retraining_summary,
     )
@@ -302,6 +322,8 @@ def save_experiment_result(result: ExperimentResult, *, output_dir: str | Path, 
     LOGGER.info("saving experiment result output_dir=%s", output)
     _write_csv(result.window_scores, output / "window_scores.csv")
     _write_csv(result.validation_scores, output / "validation_scores.csv")
+    if not result.psi_diagnostics.empty:
+        _write_csv(result.psi_diagnostics, output / "psi_diagnostics.csv")
     _write_csv(result.correlations, output / "correlations.csv")
     _write_csv(result.dataset_summary, output / "dataset_summary.csv")
     if not result.retraining_windows.empty:
@@ -329,7 +351,7 @@ def _score_windows(
     thresholds: dict[str, float] | None = None,
     initial_recent_reference: list | None = None,
     scorer: DriftScorer | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     LOGGER.info(
         "scoring windows dataset=%s stream=%s windows=%d methods=%s reference_mode=%s",
         dataset.name,
@@ -339,6 +361,7 @@ def _score_windows(
         config.reference_mode,
     )
     rows = []
+    psi_rows = []
     recent_reference = list(initial_recent_reference) if initial_recent_reference is not None else [X_ref]
     scorer_was_provided = scorer is not None
     scorer = scorer or DriftScorer(methods=config.methods, config=_drift_runtime_config(config))
@@ -379,6 +402,56 @@ def _score_windows(
         if config.reference_mode != "train":
             scorer = DriftScorer(methods=config.methods, config=_drift_runtime_config(config))
         drift_scores = scorer.compute(X_ref_cur, X_cur)
+        psi_diagnostics = scorer.last_psi_diagnostics()
+        if psi_diagnostics is not None:
+            zero_expected_share = psi_diagnostics.zero_expected_bins / max(psi_diagnostics.n_bins_total, 1)
+            zero_actual_share = psi_diagnostics.zero_actual_bins / max(psi_diagnostics.n_bins_total, 1)
+            clipped_expected_share = psi_diagnostics.clipped_expected_bins / max(psi_diagnostics.n_bins_total, 1)
+            clipped_actual_share = psi_diagnostics.clipped_actual_bins / max(psi_diagnostics.n_bins_total, 1)
+            LOGGER.info(
+                "PSI diagnostics dataset=%s stream=%s label=%s features=%d bins=%d zero_expected_share=%.4f zero_actual_share=%.4f clipped_expected_share=%.4f clipped_actual_share=%.4f top_feature=%s top_psi=%s",
+                dataset.name,
+                stream_name,
+                window.label,
+                psi_diagnostics.n_features,
+                psi_diagnostics.n_bins_total,
+                zero_expected_share,
+                zero_actual_share,
+                clipped_expected_share,
+                clipped_actual_share,
+                psi_diagnostics.top_features[0].feature_id if psi_diagnostics.top_features else "",
+                f"{psi_diagnostics.top_features[0].psi:.6f}" if psi_diagnostics.top_features else "",
+            )
+            for rank, feature in enumerate(psi_diagnostics.top_features, start=1):
+                psi_rows.append(
+                    {
+                        "dataset": dataset.name,
+                        "model": config.model_name,
+                        "stream": stream_name,
+                        "window_index": window.index,
+                        "window_label": window.label,
+                        "window_start": window.start,
+                        "window_end": window.end,
+                        "window_size": window.size,
+                        "reference_mode": config.reference_mode,
+                        "drift_representation": config.drift_representation,
+                        "reference_size": int(X_ref_cur.shape[0]),
+                        "rank": rank,
+                        "feature_id": feature.feature_id,
+                        "psi": feature.psi,
+                        "n_bins": feature.n_bins,
+                        "zero_expected_bins": feature.zero_expected_bins,
+                        "zero_actual_bins": feature.zero_actual_bins,
+                        "clipped_expected_bins": feature.clipped_expected_bins,
+                        "clipped_actual_bins": feature.clipped_actual_bins,
+                        "n_features": psi_diagnostics.n_features,
+                        "n_bins_total": psi_diagnostics.n_bins_total,
+                        "zero_expected_share": zero_expected_share,
+                        "zero_actual_share": zero_actual_share,
+                        "clipped_expected_share": clipped_expected_share,
+                        "clipped_actual_share": clipped_actual_share,
+                    }
+                )
         for drift_score in drift_scores:
             threshold = None if thresholds is None else thresholds.get(drift_score.method)
             LOGGER.debug(
@@ -426,13 +499,15 @@ def _score_windows(
                 len(recent_reference),
             )
     out = pd.DataFrame(rows)
+    psi_out = pd.DataFrame(psi_rows)
     LOGGER.info(
-        "scoring windows completed dataset=%s stream=%s rows=%d",
+        "scoring windows completed dataset=%s stream=%s rows=%d psi_diagnostic_rows=%d",
         dataset.name,
         stream_name,
         len(out),
+        len(psi_out),
     )
-    return out
+    return out, psi_out
 
 
 def _run_retraining_simulation(

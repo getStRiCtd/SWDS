@@ -23,6 +23,34 @@ class PreparedPSIReference:
     eps: float
 
 
+@dataclass(frozen=True)
+class PSIFeatureDiagnostic:
+    feature_id: int
+    psi: float
+    n_bins: int
+    zero_expected_bins: int
+    zero_actual_bins: int
+    clipped_expected_bins: int
+    clipped_actual_bins: int
+
+
+@dataclass(frozen=True)
+class PSIDiagnostics:
+    n_features: int
+    n_bins_total: int
+    zero_expected_bins: int
+    zero_actual_bins: int
+    clipped_expected_bins: int
+    clipped_actual_bins: int
+    top_features: tuple[PSIFeatureDiagnostic, ...]
+
+
+@dataclass(frozen=True)
+class PSIStatisticsResult:
+    values: np.ndarray
+    diagnostics: PSIDiagnostics
+
+
 def prepare_psi_reference(
     X_ref,
     *,
@@ -65,7 +93,7 @@ def prepare_psi_reference(
                 edges=edges,
                 reference_pct=ref_pct,
                 reference_values=None,
-                reference_counts=None,
+                reference_counts=ref_counts.astype(np.float64, copy=False),
             )
         )
 
@@ -73,7 +101,17 @@ def prepare_psi_reference(
 
 
 def psi_statistics_prepared(prepared: PreparedPSIReference, X_cur) -> np.ndarray:
+    return psi_statistics_with_diagnostics_prepared(prepared, X_cur).values
+
+
+def psi_statistics_with_diagnostics_prepared(
+    prepared: PreparedPSIReference,
+    X_cur,
+    *,
+    top_k: int = 10,
+) -> PSIStatisticsResult:
     values: list[float | None] = [None] * len(prepared.features)
+    feature_diagnostics: list[PSIFeatureDiagnostic] = []
     binary_positions = [
         pos
         for pos, feature in enumerate(prepared.features)
@@ -84,7 +122,16 @@ def psi_statistics_prepared(prepared: PreparedPSIReference, X_cur) -> np.ndarray
     if binary_cur_means is not None:
         for pos, cur_mean in zip(binary_positions, binary_cur_means, strict=True):
             ref_mean = _binary_reference_mean(prepared.features[pos])
-            values[pos] = _binary_psi(ref_mean, float(cur_mean), eps=prepared.eps)
+            ref_counts = np.asarray([1.0 - ref_mean, ref_mean], dtype=np.float64)
+            cur_counts = np.asarray([1.0 - float(cur_mean), float(cur_mean)], dtype=np.float64)
+            psi, diagnostic = _psi_from_counts(
+                ref_counts,
+                cur_counts,
+                eps=prepared.eps,
+                feature_id=prepared.features[pos].feature_id,
+            )
+            values[pos] = psi
+            feature_diagnostics.append(diagnostic)
 
     for pos, feature in enumerate(prepared.features):
         if values[pos] is not None:
@@ -93,20 +140,39 @@ def psi_statistics_prepared(prepared: PreparedPSIReference, X_cur) -> np.ndarray
         if len(cur) == 0:
             continue
         if feature.edges is None:
-            edges, ref_pct = _fallback_edges_and_reference_pct(feature, cur, n_bins=prepared.n_bins, eps=prepared.eps)
+            edges, ref_counts = _fallback_edges_and_reference_counts(feature, cur, n_bins=prepared.n_bins)
             if edges is None:
                 values[pos] = 0.0
+                feature_diagnostics.append(
+                    PSIFeatureDiagnostic(
+                        feature_id=feature.feature_id,
+                        psi=0.0,
+                        n_bins=1,
+                        zero_expected_bins=0,
+                        zero_actual_bins=0,
+                        clipped_expected_bins=0,
+                        clipped_actual_bins=0,
+                    )
+                )
                 continue
         else:
             edges = feature.edges
-            ref_pct = feature.reference_pct
-            if ref_pct is None:
+            ref_counts = feature.reference_counts
+            if ref_counts is None:
                 continue
 
         cur_counts, _ = np.histogram(cur, bins=edges)
-        cur_pct = _clipped_pct(cur_counts, eps=prepared.eps)
-        values[pos] = float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
-    return np.asarray([value for value in values if value is not None], dtype=np.float64)
+        psi, diagnostic = _psi_from_counts(
+            ref_counts,
+            cur_counts,
+            eps=prepared.eps,
+            feature_id=feature.feature_id,
+        )
+        values[pos] = psi
+        feature_diagnostics.append(diagnostic)
+    stats = np.asarray([value for value in values if value is not None], dtype=np.float64)
+    diagnostics = _summarize_feature_diagnostics(feature_diagnostics, top_k=top_k)
+    return PSIStatisticsResult(values=stats, diagnostics=diagnostics)
 
 
 def psi_statistics(
@@ -132,6 +198,33 @@ def max_psi_score(X_ref, X_cur, *, n_bins: int = 10, max_features: int | None = 
     return float(np.nanmax(stats)) if len(stats) else float("nan")
 
 
+def topk_psi_score(
+    X_ref,
+    X_cur,
+    *,
+    top_k: int = 5,
+    n_bins: int = 10,
+    max_features: int | None = 2048,
+    seed: int = 42,
+) -> float:
+    stats = psi_statistics(X_ref, X_cur, n_bins=n_bins, max_features=max_features, seed=seed)
+    return topk_psi_from_stats(stats, top_k=top_k)
+
+
+def p95_psi_score(X_ref, X_cur, *, n_bins: int = 10, max_features: int | None = 2048, seed: int = 42) -> float:
+    stats = psi_statistics(X_ref, X_cur, n_bins=n_bins, max_features=max_features, seed=seed)
+    return float(np.nanpercentile(stats, 95)) if len(stats) else float("nan")
+
+
+def topk_psi_from_stats(stats: np.ndarray, *, top_k: int = 5) -> float:
+    finite = np.asarray(stats, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if len(finite) == 0:
+        return float("nan")
+    k = min(max(int(top_k), 1), len(finite))
+    return float(np.mean(np.partition(finite, -k)[-k:]))
+
+
 def _selected_feature_ids(n_features: int, *, max_features: int | None, seed: int) -> np.ndarray:
     feature_ids = np.arange(n_features)
     if max_features is not None and n_features > max_features:
@@ -145,12 +238,11 @@ def _clipped_pct(counts: np.ndarray, *, eps: float) -> np.ndarray:
     return np.clip(pct, eps, None)
 
 
-def _fallback_edges_and_reference_pct(
+def _fallback_edges_and_reference_counts(
     feature: PreparedPSIFeature,
     cur: np.ndarray,
     *,
     n_bins: int,
-    eps: float,
 ) -> tuple[np.ndarray | None, np.ndarray]:
     if feature.reference_values is None or feature.reference_counts is None:
         return None, np.asarray([], dtype=np.float64)
@@ -166,7 +258,7 @@ def _fallback_edges_and_reference_pct(
         bins=edges,
         weights=feature.reference_counts,
     )
-    return edges, _clipped_pct(ref_counts, eps=eps)
+    return edges, ref_counts
 
 
 def _is_binary_fallback_feature(feature: PreparedPSIFeature) -> bool:
@@ -186,3 +278,46 @@ def _binary_psi(ref_mean: float, cur_mean: float, *, eps: float) -> float:
     ref_pct = np.clip(np.asarray([1.0 - ref_mean, ref_mean], dtype=np.float64), eps, None)
     cur_pct = np.clip(np.asarray([1.0 - cur_mean, cur_mean], dtype=np.float64), eps, None)
     return float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
+
+
+def _psi_from_counts(
+    ref_counts,
+    cur_counts,
+    *,
+    eps: float,
+    feature_id: int,
+) -> tuple[float, PSIFeatureDiagnostic]:
+    ref_counts = np.asarray(ref_counts, dtype=np.float64)
+    cur_counts = np.asarray(cur_counts, dtype=np.float64)
+    ref_raw = ref_counts / max(float(np.sum(ref_counts)), 1.0)
+    cur_raw = cur_counts / max(float(np.sum(cur_counts)), 1.0)
+    ref_pct = np.clip(ref_raw, eps, None)
+    cur_pct = np.clip(cur_raw, eps, None)
+    psi = float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
+    diagnostic = PSIFeatureDiagnostic(
+        feature_id=feature_id,
+        psi=psi,
+        n_bins=len(ref_counts),
+        zero_expected_bins=int(np.sum(ref_counts == 0.0)),
+        zero_actual_bins=int(np.sum(cur_counts == 0.0)),
+        clipped_expected_bins=int(np.sum(ref_raw < eps)),
+        clipped_actual_bins=int(np.sum(cur_raw < eps)),
+    )
+    return psi, diagnostic
+
+
+def _summarize_feature_diagnostics(
+    feature_diagnostics: list[PSIFeatureDiagnostic],
+    *,
+    top_k: int,
+) -> PSIDiagnostics:
+    top = sorted(feature_diagnostics, key=lambda item: item.psi, reverse=True)[: max(top_k, 0)]
+    return PSIDiagnostics(
+        n_features=len(feature_diagnostics),
+        n_bins_total=int(sum(item.n_bins for item in feature_diagnostics)),
+        zero_expected_bins=int(sum(item.zero_expected_bins for item in feature_diagnostics)),
+        zero_actual_bins=int(sum(item.zero_actual_bins for item in feature_diagnostics)),
+        clipped_expected_bins=int(sum(item.clipped_expected_bins for item in feature_diagnostics)),
+        clipped_actual_bins=int(sum(item.clipped_actual_bins for item in feature_diagnostics)),
+        top_features=tuple(top),
+    )

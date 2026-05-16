@@ -11,12 +11,15 @@ dataset:
 
 experiment:
   model_name: linear
+  model_names: [linear, hist_gbdt, lightgbm]
   window_size: 5000
+  min_test_windows: 20
+  enforce_min_test_windows: true
   seed: 42
   n_jobs: -1
   swds_backend: auto
   c2st_n_jobs: 1
-  methods: [swds, mean_ks, max_ks, mean_psi, max_psi, mmd_rbf, energy, c2st]
+  methods: [swds, mean_ks, max_ks, mean_psi, max_psi, top5_psi, mmd_rbf, energy, c2st]
   retraining:
     enabled: true
     periods: [4, 8]

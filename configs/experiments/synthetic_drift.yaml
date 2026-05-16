@@ -29,6 +29,7 @@ synthetic_drift:
     - max_ks
     - mean_psi
     - max_psi
+    - top5_psi
     - mmd_rbf
     - energy
     - c2st

@@ -57,7 +57,7 @@ class SlicedWassersteinTests(unittest.TestCase):
         cur = rng.normal(loc=0.2, size=(90, 4))
         ref = np.column_stack([ref, rng.integers(0, 2, size=len(ref))])
         cur = np.column_stack([cur, rng.integers(0, 2, size=len(cur))])
-        methods = ("mean_ks", "max_ks", "mean_psi", "max_psi", "mmd_rbf", "energy")
+        methods = ("mean_ks", "max_ks", "mean_psi", "max_psi", "top5_psi", "mmd_rbf", "energy")
         config = DriftRuntimeConfig(seed=6, mmd_max_samples=80, energy_max_samples=80)
 
         direct = compute_drift_scores(

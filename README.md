@@ -136,13 +136,19 @@ The batch runner writes `run_manifest.csv`, `dataset_exclusions.csv`, and
 `environment_manifest.json`. The report builder assembles paper-facing CSV
 tables and figures from saved experiment directories.
 
-Batch runs are resumable by default: configs whose `window_scores.csv`,
+Batch runs are resumable by default. Configs whose `window_scores.csv`,
 `validation_scores.csv`, `correlations.csv`, `dataset_summary.csv`, and
-`config.json` already exist are recorded as completed and skipped. Add
+`config.json` already exist are recorded as completed and skipped; when PSI
+methods are configured, `psi_diagnostics.csv` is also required. Add
 `--rerun-completed` to force recomputation.
 
 The dataset YAMLs keep the full method set and H3 retraining protocol, but set
-`n_jobs: -1` so drift scoring uses all CPU cores. You can override at runtime:
+`n_jobs: -1` so drift scoring uses all CPU cores. Main dataset configs also
+enforce at least 20 test windows and use
+`model_names: [linear, hist_gbdt, lightgbm]`;
+`run-batch` expands these into separate dataset-model result directories such
+as `weather__linear`, `weather__hist_gbdt`, and `weather__lightgbm`. You can
+override at runtime:
 
 ```bash
 uv run swds run-batch \
@@ -162,6 +168,11 @@ CUDA Torch wheel before launching `uv run`, then pass
 On CPU machines `auto` avoids importing Torch unless an NVIDIA device is visible
 or `SWDS_AUTO_TORCH=1` is set.
 
+External LightGBM/CatBoost/XGBoost models require `uv sync --extra gbdt`; if
+the extra is not installed, the corresponding dataset-model pair is recorded as
+an exclusion in the batch manifest. `hist_gbdt` is kept as the dependency-free
+tree fallback.
+
 For fixed train-reference monitoring, the runner prepares shared reference
 state once per dataset for SWDS, KS, PSI, MMD, energy distance, and C2ST.
 `mean_ks`/`max_ks` and `mean_psi`/`max_psi` share the same per-feature
@@ -171,11 +182,17 @@ available from the CLI, for example `--ks-max-features`, `--psi-max-features`,
 `--mmd-max-samples`, `--energy-max-samples`, `--c2st-max-samples`,
 `--c2st-n-splits`, and `--c2st-n-jobs`.
 
+PSI diagnostics are written to `psi_diagnostics.csv`: per window, the file
+contains top-10 PSI features plus zero/clipped expected and actual bin shares.
+The optional `top5_psi` method reports the mean of the five largest per-feature
+PSI values, which is less brittle than raw `max_psi` when a single sparse
+category dominates.
+
 ## Implemented drift methods
 
 - `swds`: quantile-grid Sliced Wasserstein distance;
 - `mean_ks`, `max_ks`;
-- `mean_psi`, `max_psi`;
+- `mean_psi`, `max_psi`, optional robust `top5_psi`;
 - `mmd_rbf`;
 - `energy`;
 - `c2st`: classifier two-sample test;
